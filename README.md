@@ -148,6 +148,7 @@ python scripts/download_models.py
 ```
 
 This places the following models inside `models/`:
+
 - `face_detection_yunet_2023mar.onnx` (~232 KB)
 - `w600k_r50.onnx` (~166 MB)
 
@@ -224,6 +225,7 @@ WS /ws/live-attendance
 
 - **Client Payload**: `{"image": "<base64_jpeg_frame>", "auto_mark": true}`
 - **Server Response**:
+
 ```json
 {
   "timestamp": 1727076600.12,
