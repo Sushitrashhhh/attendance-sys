@@ -13,24 +13,28 @@ env/
 venv/
 .venv/
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
+*.egg-info/
+*.egg
+.installed.cfg
+# Packaging folders, anchored to the repo root so they never match source folders
+# (an unanchored lib/ once hid frontend/src/lib)
+/develop-eggs/
+/downloads/
+/eggs/
+/.eggs/
 /lib/
 /lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+/parts/
+/sdist/
+/var/
+/wheels/
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 .mypy_cache/
+.ruff_cache/
 
 # Node
 node_modules/
@@ -41,6 +45,10 @@ pnpm-debug.log*
 frontend/dist/
 frontend/dist-ssr/
 *.local
+*.tsbuildinfo
+
+# Logs
+*.log
 
 # System & IDE
 .idea/
@@ -49,12 +57,14 @@ frontend/dist-ssr/
 *.swo
 .DS_Store
 Thumbs.db
+ehthumbs.db
+desktop.ini
 
 # Large model weights (can be downloaded on setup)
 models/*.onnx
 !models/.gitkeep
 
-# AI Tooling & Workspace Configs
+# AI tooling: config folders and agent instruction files stay local
 .agents/
 skills-lock.json
 .claude/
@@ -64,6 +74,10 @@ skills-lock.json
 .obsidian/
 .cursor/
 .windsurf/
+*_instructions.md
+CLAUDE.md
+GEMINI.md
+AGENTS.md
 
 # Local Drafts & Session Handoff
 _drafts/
@@ -72,4 +86,3 @@ _drafts/
 # Local Cache & Tool Metadata
 .vite/
 .neon
-

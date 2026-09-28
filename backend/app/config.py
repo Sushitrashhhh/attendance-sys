@@ -56,14 +56,6 @@ class Settings(BaseSettings):
         """Returns the unpooled URL for migrations if available, otherwise DATABASE_URL."""
         return self.database_url_unpooled or self.database_url
 
-    def validate_database_url(self) -> None:
-        """Fails fast with a clear explanation if DATABASE_URL is missing or empty."""
-        if not self.database_url or self.database_url.strip() == "":
-            raise ValueError(
-                "DATABASE_URL is not set. Please set DATABASE_URL in your .env file "
-                "with your Neon PostgreSQL connection string (e.g. postgresql://user:pass@ep-xyz.region.aws.neon.tech/neondb?sslmode=require)."
-            )
-
 
 @lru_cache()
 def get_settings() -> Settings:

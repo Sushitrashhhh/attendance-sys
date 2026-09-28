@@ -119,7 +119,6 @@ attendance-sys/
 │   └── download_models.py    # Automated weights downloader for YuNet & ArcFace
 ├── docker-compose.yml        # Multi-container orchestration (Backend + Frontend)
 ├── .env.example              # Environment variable template
-├── attendance-sys_instructions.md # Project-specific architectural standing instructions
 └── README.md
 ```
 
@@ -272,11 +271,14 @@ WS /ws/live-attendance
 
 ## Automated Testing
 
-Run the test suite covering CV components, biometric normalization, anti-spoofing heuristics, and API routes:
+Run the test suite covering CV components, biometric normalization, anti-spoofing heuristics, the head-turn challenge, lectures, excused absences and API routes:
 
 ```bash
-pytest backend/tests/
+cd backend
+pytest -q
 ```
+
+The database tests use the `DATABASE_URL` from `.env` and create (then delete) students whose roll numbers start with `TEST_`.
 
 ---
 

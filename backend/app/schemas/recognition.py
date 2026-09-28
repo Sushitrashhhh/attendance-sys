@@ -26,8 +26,3 @@ class RecognitionResult(BaseModel):
     challenge: Optional[str] = Field(None, description="turn_left | turn_right while a head-turn check is pending")
     message: Optional[str] = None
     bbox: Optional[List[int]] = Field(None, description="[x, y, w, h]")
-
-
-class LiveFrameRecognitionResult(BaseModel):
-    faces: List[RecognitionResult] = []
-    fps: Optional[float] = None

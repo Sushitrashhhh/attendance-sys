@@ -22,18 +22,6 @@ class AttendanceRead(BaseModel):
     created_at: datetime
 
 
-class AttendanceResponse(BaseModel):
-    status: str = Field(..., description="marked | already_marked | unknown | liveness_failed")
-    student_id: Optional[int] = None
-    student_name: Optional[str] = None
-    roll_number: Optional[str] = None
-    attendance_date: Optional[str] = None
-    attendance_time: Optional[str] = None
-    confidence: Optional[float] = None
-    liveness_score: Optional[float] = None
-    message: Optional[str] = None
-
-
 class AttendanceListResponse(BaseModel):
     total: int
     items: List[AttendanceRead]

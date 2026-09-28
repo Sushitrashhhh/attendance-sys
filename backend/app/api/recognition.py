@@ -125,7 +125,6 @@ def _process_frame(session: LiveSession, msg: dict) -> list:
     return [r.model_dump() for r in results]
 
 
-@router.websocket("/ws")
 async def websocket_recognition(websocket: WebSocket):
     """
     Real-time bidirectional WebSocket stream for live webcam attendance.

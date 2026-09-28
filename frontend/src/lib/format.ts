@@ -26,12 +26,3 @@ export function outlookText(outlook: { can_miss: number } | { must_attend: numbe
   if (outlook.can_miss === 0) return `Don't miss the next class: it would take you below ${target}%.`;
   return `You can miss ${classes(outlook.can_miss)} and still stay at ${target}% or above.`;
 }
-
-export const initials = (name: string) =>
-  name
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((n) => n[0])
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
