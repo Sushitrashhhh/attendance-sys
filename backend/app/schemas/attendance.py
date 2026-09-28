@@ -16,6 +16,9 @@ class AttendanceRead(BaseModel):
     status: str
     confidence: float
     liveness_score: float
+    method: str = "face"
+    lecture_id: Optional[int] = None
+    lecture_subject: Optional[str] = None
     created_at: datetime
 
 
@@ -34,3 +37,8 @@ class AttendanceResponse(BaseModel):
 class AttendanceListResponse(BaseModel):
     total: int
     items: List[AttendanceRead]
+
+
+class ManualMarkRequest(BaseModel):
+    student_id: int
+    lecture_id: Optional[int] = None

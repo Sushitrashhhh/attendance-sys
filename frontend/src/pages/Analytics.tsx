@@ -1,200 +1,182 @@
-import React, { useState, useEffect } from 'react';
-import {
-  BarChart3,
-  TrendingUp,
-  Users,
-  CheckCircle2,
-  XCircle,
-  RefreshCw,
-  Award,
-} from 'lucide-react';
-import { fetchAnalyticsOverview, fetchAnalyticsTrends } from '../api/client';
-import type { AnalyticsOverview } from '../types';
+import { useState } from 'react';
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { fetchStudentReport, fetchTrends } from '../api/client';
+import { LecturePicker } from '../components/LecturePicker';
+import { Card, EmptyState, ErrorNote, Loading, PageHeader, table } from '../components/ui';
+import { useLectureChoice } from '../lib/useLectureChoice';
+import { LOW_ATTENDANCE } from '../lib/constants';
+import { fmtDate } from '../lib/format';
+import { useData } from '../lib/useData';
+import type { TrendPoint } from '../types';
 
-export const Analytics: React.FC = () => {
-  const [overview, setOverview] = useState<AnalyticsOverview | null>(null);
-  const [trends, setTrends] = useState<{ date: string; day: string; present: number }[]>([]);
-  const [loading, setLoading] = useState(true);
+
+const RANGES = [7, 14, 30];
+
+function TrendTooltip({ active, payload }: { active?: boolean; payload?: { payload: TrendPoint }[] }) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0].payload;
+  return (
+    <div className="rounded-md border border-stone-200 bg-white px-3 py-2 text-xs shadow-sm">
+      <div className="text-stone-500">{fmtDate(p.date, { weekday: 'short', day: 'numeric', month: 'short' })}</div>
+      <div className="mt-0.5 font-medium text-stone-900">{p.present} present</div>
+    </div>
+  );
+}
+
+export function Analytics() {
   const [days, setDays] = useState(14);
+  const [onlyLow, setOnlyLow] = useState(false);
+  const trends = useData(() => fetchTrends(days), [days]);
+  // Reports default to all subjects, not whichever lecture happens to be running now
+  const choice = useLectureChoice();
+  const lectureId = choice.auto ? null : choice.lectureId;
+  const report = useData(() => fetchStudentReport(lectureId), [lectureId]);
 
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      const [ovData, trData] = await Promise.all([
-        fetchAnalyticsOverview(),
-        fetchAnalyticsTrends(days),
-      ]);
-      setOverview(ovData);
-      setTrends(trData);
-    } catch (err) {
-      console.error('Failed to load analytics:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadData();
-  }, [days]);
-
-  const maxPresent = Math.max(...trends.map((t) => t.present), 1);
+  const rows = [...(report.data ?? [])]
+    .filter((r) => !onlyLow || (r.percentage !== null && r.percentage < LOW_ATTENDANCE))
+    .sort((a, b) => (a.percentage ?? 101) - (b.percentage ?? 101) || a.roll_number.localeCompare(b.roll_number));
+  const lowCount = report.data?.filter((r) => r.percentage !== null && r.percentage < LOW_ATTENDANCE).length ?? 0;
+  const chartData = (trends.data ?? []).map((t) => ({ ...t, label: fmtDate(t.date, { day: 'numeric', month: 'short' }) }));
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-            <BarChart3 className="h-6 w-6 text-blue-400" />
-            Attendance Analytics & Trends
-          </h1>
-          <p className="text-sm text-slate-400 mt-1">
-            Real-time analytics aggregated directly from PostgreSQL attendance records.
-          </p>
-        </div>
+    <>
+      <PageHeader title="Reports" />
+      {(trends.error || report.error) && <ErrorNote message={(trends.error || report.error)!} />}
 
-        <div className="flex items-center gap-3">
-          <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-xs font-medium">
-            {[7, 14, 30].map((d) => (
+      <Card
+        className="mb-6"
+        title="Students present per day"
+        action={
+          <div className="flex rounded-md border border-stone-300 p-0.5 text-xs" role="group" aria-label="Date range">
+            {RANGES.map((d) => (
               <button
                 key={d}
                 onClick={() => setDays(d)}
-                className={`px-3 py-1.5 rounded-md transition-colors ${
-                  days === d
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
+                aria-pressed={days === d}
+                className={`rounded px-2.5 py-1 font-medium ${days === d ? 'bg-stone-800 text-white' : 'text-stone-600 hover:text-stone-900'}`}
               >
-                {d} Days
+                {d} days
               </button>
             ))}
           </div>
-
-          <button
-            onClick={loadData}
-            className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white transition-colors"
-            title="Refresh analytics"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin text-blue-400' : ''}`} />
-          </button>
-        </div>
-      </div>
-
-      {/* Overview Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="glass-panel p-5 rounded-xl border border-slate-800 flex items-center justify-between">
-          <div>
-            <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
-              Total Enrolled
-            </span>
-            <div className="text-2xl font-bold text-white mt-1">
-              {overview?.total_students ?? 0}
+        }
+      >
+        {!trends.data ? (
+          <Loading />
+        ) : (
+          <div className="p-4">
+            <div className="h-64" role="img" aria-label={`Bar chart of students present per day over the last ${days} days`}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: -16 }} barCategoryGap={2}>
+                  <CartesianGrid vertical={false} stroke="#e7e5e4" />
+                  <XAxis
+                    dataKey="label"
+                    tickLine={false}
+                    axisLine={{ stroke: '#d6d3d1' }}
+                    tick={{ fill: '#78716c', fontSize: 12 }}
+                    interval="preserveStartEnd"
+                    minTickGap={16}
+                  />
+                  <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: '#78716c', fontSize: 12 }} />
+                  <Tooltip content={<TrendTooltip />} cursor={{ fill: '#f5f5f4' }} />
+                  <Bar dataKey="present" fill="#0d8a6f" radius={[4, 4, 0, 0]} maxBarSize={36} isAnimationActive={false} />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
-            <span className="text-xs text-slate-500 mt-1 block">Active biometric profiles</span>
+            <details className="mt-3 text-sm">
+              <summary className="cursor-pointer text-stone-500 hover:text-stone-800">Show as table</summary>
+              <table className={`${table.el} mt-2`}>
+                <thead>
+                  <tr>
+                    <th className={table.th}>Date</th>
+                    <th className={`${table.th} text-right`}>Present</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trends.data.map((t) => (
+                    <tr key={t.date}>
+                      <td className={table.td}>{fmtDate(t.date, { weekday: 'short', day: 'numeric', month: 'short' })}</td>
+                      <td className={`${table.td} text-right tabular-nums`}>{t.present}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
           </div>
-          <div className="h-12 w-12 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
-            <Users className="h-6 w-6" />
-          </div>
-        </div>
+        )}
+      </Card>
 
-        <div className="glass-panel p-5 rounded-xl border border-slate-800 flex items-center justify-between">
-          <div>
-            <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
-              Present Today
-            </span>
-            <div className="text-2xl font-bold text-emerald-400 mt-1">
-              {overview?.present_today ?? 0}
-            </div>
-            <span className="text-xs text-slate-500 mt-1 block">Verified through camera</span>
+      <Card
+        title="Attendance by student"
+        action={
+          <div className="flex flex-wrap items-center gap-4">
+          <LecturePicker lectures={choice.lectures} value={lectureId} onChange={choice.choose} noneLabel="All subjects" />
+          <label className="flex items-center gap-2 text-xs text-stone-600">
+            <input type="checkbox" checked={onlyLow} onChange={(e) => setOnlyLow(e.target.checked)} className="accent-accent" />
+            Only below {LOW_ATTENDANCE}% ({lowCount})
+          </label>
           </div>
-          <div className="h-12 w-12 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-            <CheckCircle2 className="h-6 w-6" />
+        }
+      >
+        <p className="border-b border-stone-100 px-4 py-2.5 text-xs text-stone-500">
+          {lectureId
+            ? "Counts each day this lecture's attendance was taken, for students in its class. Late counts as attended."
+            : 'A class day is any day attendance was taken. Each student is counted from the day they were added.'}{' '}
+          Excused days are left out.
+        </p>
+        {!report.data ? (
+          <Loading />
+        ) : rows.length === 0 ? (
+          <EmptyState>{onlyLow ? `No one is below ${LOW_ATTENDANCE}%.` : 'No students yet.'}</EmptyState>
+        ) : (
+          <div className={table.wrap}>
+            <table className={table.el}>
+              <thead>
+                <tr>
+                  <th className={table.th}>Roll no.</th>
+                  <th className={table.th}>Name</th>
+                  <th className={table.th}>Branch</th>
+                  <th className={table.th}>Sem</th>
+                  <th className={`${table.th} text-right`}>Attended</th>
+                  <th className={`${table.th} text-right`}>Late</th>
+                  <th className={`${table.th} text-right`}>Excused</th>
+                  <th className={`${table.th} w-48`}>Attendance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const low = r.percentage !== null && r.percentage < LOW_ATTENDANCE;
+                  return (
+                    <tr key={r.student_id} className="hover:bg-stone-50">
+                      <td className={`${table.td} font-mono text-xs`}>{r.roll_number}</td>
+                      <td className={`${table.td} font-medium`}>{r.name}</td>
+                      <td className={table.td}>{r.branch}</td>
+                      <td className={table.td}>{r.semester}</td>
+                      <td className={`${table.td} text-right tabular-nums`}>
+                        {r.present_days} / {r.total_days}
+                      </td>
+                      <td className={`${table.td} text-right tabular-nums text-stone-600`}>{r.late_days || '–'}</td>
+                      <td className={`${table.td} text-right tabular-nums text-stone-600`}>{r.excused_days || '–'}</td>
+                      <td className={table.td}>
+                        {r.percentage === null ? (
+                          <span className="text-stone-400">No class days yet</span>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-stone-100">
+                              <div className={`h-full rounded-full ${low ? 'bg-red-500' : 'bg-accent'}`} style={{ width: `${r.percentage}%` }} />
+                            </div>
+                            <span className={`w-12 text-right tabular-nums ${low ? 'font-medium text-red-700' : ''}`}>{r.percentage}%</span>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-        </div>
-
-        <div className="glass-panel p-5 rounded-xl border border-slate-800 flex items-center justify-between">
-          <div>
-            <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
-              Absent Today
-            </span>
-            <div className="text-2xl font-bold text-amber-400 mt-1">
-              {overview?.absent_today ?? 0}
-            </div>
-            <span className="text-xs text-slate-500 mt-1 block">Remaining unenrolled / unverified</span>
-          </div>
-          <div className="h-12 w-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
-            <XCircle className="h-6 w-6" />
-          </div>
-        </div>
-
-        <div className="glass-panel p-5 rounded-xl border border-slate-800 flex items-center justify-between">
-          <div>
-            <span className="text-xs font-medium uppercase tracking-wider text-slate-400">
-              Attendance Rate
-            </span>
-            <div className="text-2xl font-bold text-cyan-400 mt-1">
-              {overview?.attendance_rate ?? 0}%
-            </div>
-            <span className="text-xs text-slate-500 mt-1 block">Daily participation index</span>
-          </div>
-          <div className="h-12 w-12 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
-            <Award className="h-6 w-6" />
-          </div>
-        </div>
-      </div>
-
-      {/* Main Trend Chart */}
-      <div className="glass-panel p-6 rounded-xl border border-slate-800 space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-              <TrendingUp className="h-5 w-5 text-blue-400" />
-              Daily Attendance Trends ({days} Days)
-            </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Verified daily student presence over calendar days.
-            </p>
-          </div>
-        </div>
-
-        {/* Custom Visual Bar Chart */}
-        <div className="h-64 flex items-end gap-2 pt-6 pb-2 border-b border-slate-800">
-          {trends.map((t, idx) => {
-            const heightPercent = Math.max(8, (t.present / maxPresent) * 100);
-            return (
-              <div
-                key={idx}
-                className="flex-1 flex flex-col items-center gap-2 group relative h-full justify-end"
-              >
-                {/* Tooltip */}
-                <div className="absolute -top-10 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900 border border-slate-700 px-2 py-1 rounded text-[11px] text-white whitespace-nowrap z-10 pointer-events-none shadow-lg">
-                  {t.date}: <span className="text-emerald-400 font-bold">{t.present} Present</span>
-                </div>
-
-                {/* Bar */}
-                <div
-                  style={{ height: `${heightPercent}%` }}
-                  className={`w-full rounded-t-md transition-all duration-300 ${
-                    t.present > 0
-                      ? 'bg-gradient-to-t from-blue-600 to-indigo-500 group-hover:from-blue-500 group-hover:to-cyan-400'
-                      : 'bg-slate-800/60'
-                  }`}
-                />
-
-                {/* Date Label */}
-                <span className="text-[10px] text-slate-400 group-hover:text-white font-mono">
-                  {t.day}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="flex items-center justify-between text-xs text-slate-500">
-          <span>Scale: 0 to {maxPresent} attendees</span>
-          <span>Source: Neon PostgreSQL Unique Attendance Table</span>
-        </div>
-      </div>
-    </div>
+        )}
+      </Card>
+    </>
   );
-};
+}

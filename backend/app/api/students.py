@@ -1,11 +1,13 @@
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db.database import get_db
 from app.repositories.student_repo import StudentRepository
-from app.schemas.student import StudentRead, StudentListResponse
+from app.schemas.student import StudentRead, StudentListResponse, StudentUpdate
 from app.cv.pipeline import get_pipeline
 from app.cv.preprocessing import decode_image_bytes, decode_base64_image
 
@@ -14,7 +16,7 @@ router = APIRouter(prefix="/api/students", tags=["Students"])
 
 
 @router.post("", response_model=StudentRead, status_code=status.HTTP_201_CREATED)
-async def register_student(
+def register_student(
     name: str = Form(..., min_length=2, max_length=120),
     roll_number: str = Form(..., min_length=1, max_length=50),
     branch: str = Form(..., min_length=2, max_length=100),
@@ -44,7 +46,7 @@ async def register_student(
     # 2. Decode image
     img_bgr = None
     if image is not None:
-        content = await image.read()
+        content = image.file.read()
         if len(content) > 10 * 1024 * 1024:  # 10MB limit
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -80,14 +82,30 @@ async def register_student(
             detail=f"Facial enrollment rejected: {enrollment.message}",
         )
 
-    # 4. Save in PostgreSQL
-    new_student = student_repo.create(
-        name=name,
-        roll_number=roll_number,
-        branch=branch,
-        semester=semester,
-        embedding=enrollment.embedding,
-    )
+    # 4. Refuse to enroll the same face twice under different roll numbers
+    nearest = student_repo.find_nearest(enrollment.embedding)
+    if nearest and nearest[1] >= get_settings().recognition_threshold:
+        match, _ = nearest
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This face is already registered to {match.name} ({match.roll_number}).",
+        )
+
+    # 5. Save in PostgreSQL
+    try:
+        new_student = student_repo.create(
+            name=name,
+            roll_number=roll_number,
+            branch=branch,
+            semester=semester,
+            embedding=enrollment.embedding,
+        )
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Student with roll number '{roll_number}' already exists.",
+        )
 
     logger.info(f"Student enrolled: id={new_student.id}, roll={new_student.roll_number}")
     return new_student
@@ -117,6 +135,45 @@ def get_student(student_id: int, db: Session = Depends(get_db)):
             detail=f"Student with ID {student_id} not found.",
         )
     return student
+
+
+@router.put("/{student_id}", response_model=StudentRead)
+def update_student(student_id: int, payload: StudentUpdate, db: Session = Depends(get_db)):
+    """Edit a student's details. The face enrollment is left untouched."""
+    student_repo = StudentRepository(db)
+    student = student_repo.get_by_id(student_id)
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with ID {student_id} not found.",
+        )
+    if payload.roll_number:
+        clash = student_repo.get_by_roll_number(payload.roll_number)
+        if clash and clash.id != student_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Roll number '{payload.roll_number}' is already taken by {clash.name}.",
+            )
+    try:
+        return student_repo.update(student, **payload.model_dump())
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Roll number '{payload.roll_number}' is already taken.",
+        )
+
+
+@router.delete("/{student_id}/face-samples")
+def forget_learned_faces(student_id: int, db: Session = Depends(get_db)):
+    """Drop face references learned from live check-ins; the enrollment photo is kept."""
+    student_repo = StudentRepository(db)
+    if not student_repo.get_by_id(student_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with ID {student_id} not found.",
+        )
+    return {"removed": student_repo.clear_face_samples(student_id)}
 
 
 @router.delete("/{student_id}")

@@ -63,6 +63,21 @@ def align_face_112x112(img: np.ndarray, landmarks: np.ndarray) -> np.ndarray:
     return aligned
 
 
+def yaw_ratio(landmarks: np.ndarray) -> float:
+    """
+    Horizontal head turn from the 5 YuNet landmarks: horizontal offset of the nose tip from the
+    eye midpoint, measured in inter-eye distances. ~0 when facing the camera.
+    Positive = nose toward image-right, i.e. the subject turning to THEIR left in an unmirrored frame.
+    A flat photo rotated in front of the camera keeps this ratio constant (both distances shrink
+    together), so it can only change for a real 3D head.
+    """
+    right_eye, left_eye, nose = landmarks[0], landmarks[1], landmarks[2]
+    eye_dist = float(np.hypot(*(left_eye - right_eye)))
+    if eye_dist < 1e-3:
+        return 0.0
+    return float((nose[0] - (right_eye[0] + left_eye[0]) / 2.0) / eye_dist)
+
+
 def assess_image_quality(img: np.ndarray, min_brightness: float = 40.0, max_brightness: float = 230.0, min_laplacian_var: float = 30.0) -> Tuple[bool, str, dict]:
     """
     Validate quality of an enrollment / recognition face image:

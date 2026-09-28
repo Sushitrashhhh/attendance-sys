@@ -82,11 +82,11 @@ class FaceDetector:
                 [face[12], face[13]]  # Left mouth
             ], dtype=np.float32)
 
-            # Clamp bounding box coordinates to image boundaries
-            x = max(0, x)
-            y = max(0, y)
-            fw = min(w - x, fw)
-            fh = min(h - y, fh)
+            # Clamp bounding box to image boundaries (shrink w/h by whatever was cut off)
+            x0, y0 = max(0, x), max(0, y)
+            fw = min(x + fw, w) - x0
+            fh = min(y + fh, h) - y0
+            x, y = x0, y0
 
             if fw > 10 and fh > 10:
                 detected.append(DetectedFace(

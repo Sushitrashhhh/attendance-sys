@@ -1,3 +1,4 @@
+import threading
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
 import numpy as np
@@ -9,6 +10,7 @@ from app.cv.liveness import LivenessDetector, LivenessResult
 from app.cv.preprocessing import (
     align_face_112x112,
     assess_image_quality,
+    yaw_ratio,
     decode_image_bytes,
     decode_base64_image,
 )
@@ -32,16 +34,20 @@ class FrameFaceResult:
     aligned_crop: np.ndarray
     embedding: List[float]
     liveness: LivenessResult
+    yaw: float  # see preprocessing.yaw_ratio
 
 
 class FaceRecognitionPipeline:
     """
     Unified CV pipeline handling detection, alignment, embedding, and anti-spoofing.
-    Thread-safe and reused across API routes and services.
+    Shared across API routes; a lock serialises inference because the YuNet detector
+    mutates its input size per call and is not safe to use from two threads at once.
     """
 
     def __init__(self):
         settings = get_settings()
+        # ponytail: one global lock = one inference at a time; use a detector pool if several cameras run concurrently
+        self._lock = threading.Lock()
         self.detector = FaceDetector(conf_threshold=0.55)
         self.embedder = FaceEmbedder()
         self.liveness_detector = LivenessDetector(threshold=settings.liveness_threshold)
@@ -54,6 +60,10 @@ class FaceRecognitionPipeline:
         3. Align to 112x112 canonical ArcFace reference
         4. Generate L2-normalized 512-D embedding
         """
+        with self._lock:
+            return self._process_enrollment_image(img_bgr)
+
+    def _process_enrollment_image(self, img_bgr: np.ndarray) -> EnrollmentResult:
         valid_face, face_msg, detected_face = self.detector.validate_single_face_for_enrollment(img_bgr)
         if not valid_face or detected_face is None:
             return EnrollmentResult(success=False, message=face_msg)
@@ -90,6 +100,10 @@ class FaceRecognitionPipeline:
         Process incoming webcam frame:
         Detects faces, evaluates liveness, aligns, and extracts 512-D embeddings.
         """
+        with self._lock:
+            return self._process_frame(img_bgr, max_faces)
+
+    def _process_frame(self, img_bgr: np.ndarray, max_faces: int) -> List[FrameFaceResult]:
         detected_faces = self.detector.detect(img_bgr)
         results: List[FrameFaceResult] = []
 
@@ -114,6 +128,7 @@ class FaceRecognitionPipeline:
                     aligned_crop=aligned,
                     embedding=embedding,
                     liveness=liveness,
+                    yaw=yaw_ratio(face.landmarks),
                 )
             )
 

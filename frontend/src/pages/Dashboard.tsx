@@ -1,260 +1,224 @@
-import React, { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { Camera } from 'lucide-react';
 import {
-  Users,
-  UserCheck,
-  UserX,
-  Percent,
-  Shield,
-  Cpu,
-  Database,
-  Activity,
-  ArrowUpRight,
-  RefreshCw,
-  Clock,
-} from 'lucide-react';
-import type { HealthStatus, AnalyticsOverview, AttendanceRecord } from '../types';
-import { fetchAnalyticsOverview, fetchTodayAttendance } from '../api/client';
+  deleteAttendance,
+  fetchAbsentToday,
+  fetchOverview,
+  fetchTodayAttendance,
+  markPresent,
+} from '../api/client';
+import { ExcuseForm } from '../components/Excusals';
+import { LecturePicker } from '../components/LecturePicker';
+import { Card, EmptyState, ErrorNote, LateTag, Loading, MethodTag, Modal, PageHeader, button } from '../components/ui';
+import { fmtTime, isoDate, fmtDate } from '../lib/format';
+import { lectureTime } from '../lib/lectures';
+import { useData } from '../lib/useData';
+import { useLectureChoice } from '../lib/useLectureChoice';
+import type { Student } from '../types';
 
-interface DashboardProps {
-  health: HealthStatus | null;
-  onNavigateToLive: () => void;
-  onNavigateToRegister: () => void;
-}
+export function Dashboard() {
+  const choice = useLectureChoice();
+  const { lectureId, lecture } = choice;
+  const { data, error, reload } = useData(
+    () => Promise.all([fetchOverview(lectureId), fetchTodayAttendance(lectureId), fetchAbsentToday(lectureId)]),
+    [lectureId],
+    15000
+  );
+  const [busy, setBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [filter, setFilter] = useState('');
+  const [excusing, setExcusing] = useState<Student | null>(null);
 
-export const Dashboard: React.FC<DashboardProps> = ({
-  health,
-  onNavigateToLive,
-  onNavigateToRegister,
-}) => {
-  const isDbConnected = health?.database === 'connected';
-  const [overview, setOverview] = useState<AnalyticsOverview | null>(null);
-  const [recentAttendance, setRecentAttendance] = useState<AttendanceRecord[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const loadMetrics = async () => {
+  const run = async (key: string, action: () => Promise<unknown>) => {
+    setBusy(key);
+    setActionError(null);
     try {
-      const [ov, att] = await Promise.all([
-        fetchAnalyticsOverview(),
-        fetchTodayAttendance(),
-      ]);
-      setOverview(ov);
-      setRecentAttendance(att.slice(0, 5));
-    } catch (err) {
-      console.error('Failed to load dashboard metrics:', err);
+      await action();
+      reload();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Action failed');
     } finally {
-      setLoading(false);
+      setBusy(null);
     }
   };
 
-  useEffect(() => {
-    loadMetrics();
-    const interval = setInterval(loadMetrics, 12000);
-    return () => clearInterval(interval);
-  }, []);
+  const [overview, present, absent] = data ?? [null, [], []];
+  const term = filter.trim().toLowerCase();
+  const absentShown = term
+    ? absent.filter((s) => s.name.toLowerCase().includes(term) || s.roll_number.toLowerCase().includes(term))
+    : absent;
+  const rate = overview && overview.total_students > 0 ? overview.present_today / overview.total_students : 0;
 
   return (
-    <div className="space-y-8">
-      {/* Hero Welcome Banner */}
-      <div className="relative overflow-hidden rounded-2xl glass-panel p-8 border border-slate-800 bg-gradient-to-r from-slate-900/90 via-slate-900/60 to-blue-950/40">
-        <div className="relative z-10 max-w-3xl space-y-4">
-          <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20">
-            <Shield className="h-3.5 w-3.5" />
-            <span>AI Computer Vision + pgvector Attendance Engine</span>
-          </div>
-          <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white">
-            Real-Time Face Recognition Attendance
-          </h1>
-          <p className="text-slate-400 text-sm sm:text-base leading-relaxed">
-            High-precision ArcFace 512-dim facial embeddings, OpenCV YuNet detection,
-            multi-factor anti-spoofing liveness verification, and instant similarity search hosted on Neon PostgreSQL.
-          </p>
+    <>
+      <PageHeader
+        title="Overview"
+        subtitle={`${fmtDate(isoDate(), { weekday: 'long', day: 'numeric', month: 'long' })}${
+          lecture ? ` · ${lecture.subject}, ${lectureTime(lecture)}` : ''
+        }`}
+      >
+        <LecturePicker lectures={choice.lectures} value={lectureId} onChange={choice.choose} />
+        <a href="#live" className={button.primary}>
+          <Camera className="h-4 w-4" />
+          Take attendance
+        </a>
+      </PageHeader>
 
-          <div className="pt-2 flex flex-wrap gap-3">
-            <button
-              onClick={onNavigateToLive}
-              className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-all shadow-lg shadow-blue-600/20"
-            >
-              <span>Launch Live Camera</span>
-              <ArrowUpRight className="h-4 w-4" />
-            </button>
-            <button
-              onClick={onNavigateToRegister}
-              className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold border border-slate-700 transition-all"
-            >
-              <span>Register Student</span>
-            </button>
-          </div>
-        </div>
-      </div>
+      {error && <ErrorNote message={error} />}
+      {actionError && <ErrorNote message={actionError} />}
 
-      {/* Metric Cards Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-        <div className="glass-panel rounded-xl p-5 border border-slate-800/80 hover:border-slate-700/80 transition-all">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              Total Enrolled
-            </span>
-            <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400">
-              <Users className="h-5 w-5" />
-            </div>
-          </div>
-          <div className="mt-4">
-            <span className="text-2xl font-bold text-white">
-              {overview?.total_students ?? 0}
-            </span>
-            <span className="ml-2 text-xs text-slate-400">students</span>
-          </div>
-          <p className="mt-1 text-xs text-slate-400">Registered biometric profiles</p>
-        </div>
-
-        <div className="glass-panel rounded-xl p-5 border border-slate-800/80 hover:border-slate-700/80 transition-all">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              Present Today
-            </span>
-            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400">
-              <UserCheck className="h-5 w-5" />
-            </div>
-          </div>
-          <div className="mt-4">
-            <span className="text-2xl font-bold text-emerald-400">
-              {overview?.present_today ?? 0}
-            </span>
-            <span className="ml-2 text-xs text-slate-400">verified</span>
-          </div>
-          <p className="mt-1 text-xs text-slate-400">Unique daily attendance marks</p>
-        </div>
-
-        <div className="glass-panel rounded-xl p-5 border border-slate-800/80 hover:border-slate-700/80 transition-all">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              Absent Today
-            </span>
-            <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400">
-              <UserX className="h-5 w-5" />
-            </div>
-          </div>
-          <div className="mt-4">
-            <span className="text-2xl font-bold text-amber-400">
-              {overview?.absent_today ?? 0}
-            </span>
-            <span className="ml-2 text-xs text-slate-400">unmarked</span>
-          </div>
-          <p className="mt-1 text-xs text-slate-400">Awaiting attendance</p>
-        </div>
-
-        <div className="glass-panel rounded-xl p-5 border border-slate-800/80 hover:border-slate-700/80 transition-all">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              Attendance Rate
-            </span>
-            <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400">
-              <Percent className="h-5 w-5" />
-            </div>
-          </div>
-          <div className="mt-4">
-            <span className="text-2xl font-bold text-cyan-400">
-              {overview?.attendance_rate ?? 0.0}%
-            </span>
-            <span className="ml-2 text-xs text-slate-400">today</span>
-          </div>
-          <p className="mt-1 text-xs text-slate-400">Daily verification index</p>
-        </div>
-      </div>
-
-      {/* System Health & Architecture Summary */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 glass-panel rounded-xl p-6 border border-slate-800/80 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-bold text-white flex items-center space-x-2">
-              <Activity className="h-5 w-5 text-blue-400" />
-              <span>Vision Architecture & Live Telemetry</span>
-            </h2>
-            <span className="text-xs px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
-              Production Active
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
-            <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
-              <div className="flex items-center space-x-2 text-xs font-medium text-slate-400">
-                <Cpu className="h-4 w-4 text-cyan-400" />
-                <span>Face Model</span>
+      <Card className="mb-6 p-5">
+        {!overview ? (
+          <Loading />
+        ) : (
+          <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <div className="text-sm text-stone-500">{lecture ? `Present in ${lecture.subject}` : 'Present today'}</div>
+              <div className="mt-1 text-3xl font-semibold tabular-nums">
+                {overview.present_today}
+                <span className="text-lg font-normal text-stone-400"> / {overview.total_students}</span>
               </div>
-              <p className="mt-2 text-sm font-semibold text-white">ArcFace (512-dim)</p>
-              <p className="text-xs text-slate-400">ResNet-50 L2-normalized</p>
-            </div>
-
-            <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
-              <div className="flex items-center space-x-2 text-xs font-medium text-slate-400">
-                <Shield className="h-4 w-4 text-emerald-400" />
-                <span>Detection Engine</span>
+              <div className="mt-3 h-1.5 w-64 max-w-full overflow-hidden rounded-full bg-stone-100">
+                <div className="h-full rounded-full bg-accent" style={{ width: `${rate * 100}%` }} />
               </div>
-              <p className="mt-2 text-sm font-semibold text-white">OpenCV YuNet</p>
-              <p className="text-xs text-slate-400">5-point affine alignment</p>
             </div>
-
-            <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800">
-              <div className="flex items-center space-x-2 text-xs font-medium text-slate-400">
-                <Database className="h-4 w-4 text-purple-400" />
-                <span>Neon Vector Store</span>
-              </div>
-              <p className="mt-2 text-sm font-semibold text-white">
-                {isDbConnected ? 'Connected & Ready' : 'Awaiting Connection'}
-              </p>
-              <p className="text-xs text-slate-400">Cosine Distance (&lt;=&gt;)</p>
-            </div>
-          </div>
-
-          <div className="p-4 rounded-xl bg-blue-950/20 border border-blue-900/30 text-xs text-slate-300 space-y-1">
-            <p className="font-semibold text-blue-300">Architecture Guarantee:</p>
-            <p className="text-slate-400">
-              Attendance records are strictly protected by a relational constraint{' '}
-              <code className="text-blue-400 font-mono">UNIQUE(student_id, attendance_date)</code> in
-              Neon PostgreSQL, preventing duplicate check-ins on the same calendar day. Biometric embeddings
-              are kept server-side only and never exposed in browser responses.
-            </p>
-          </div>
-        </div>
-
-        {/* Live Diagnostics & Recent Activity Card */}
-        <div className="glass-panel rounded-xl p-6 border border-slate-800/80 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-              <Clock className="h-4 w-4 text-blue-400" />
-              <span>Recent Activity</span>
-            </h2>
-            <button onClick={loadMetrics} className="text-slate-400 hover:text-white">
-              <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-            </button>
-          </div>
-
-          {recentAttendance.length === 0 ? (
-            <div className="text-center py-8 text-xs text-slate-500">
-              No check-ins recorded yet today.
-            </div>
-          ) : (
-            <div className="space-y-2 text-xs">
-              {recentAttendance.map((rec) => (
-                <div
-                  key={rec.id}
-                  className="p-2.5 rounded-lg bg-slate-900/50 border border-slate-800 flex items-center justify-between"
-                >
-                  <div>
-                    <span className="font-semibold text-white block">{rec.student_name}</span>
-                    <span className="text-[11px] text-slate-400 font-mono">
-                      {rec.roll_number} &bull; {rec.attendance_time}
-                    </span>
-                  </div>
-                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                    {Math.round(rec.confidence * 100)}%
-                  </span>
+            <dl className="flex gap-8 text-sm">
+              {lecture && (
+                <div>
+                  <dt className="text-stone-500">Late</dt>
+                  <dd className="mt-0.5 text-lg font-medium tabular-nums">{overview.late_today}</dd>
                 </div>
+              )}
+              <div>
+                <dt className="text-stone-500">Not marked</dt>
+                <dd className="mt-0.5 text-lg font-medium tabular-nums">{overview.absent_today}</dd>
+              </div>
+              {overview.excused_today > 0 && (
+                <div>
+                  <dt className="text-stone-500">Excused</dt>
+                  <dd className="mt-0.5 text-lg font-medium tabular-nums">{overview.excused_today}</dd>
+                </div>
+              )}
+              <div>
+                <dt className="text-stone-500">Attendance rate</dt>
+                <dd className="mt-0.5 text-lg font-medium tabular-nums">{overview.attendance_rate}%</dd>
+              </div>
+            </dl>
+          </div>
+        )}
+      </Card>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card
+          title={`Not marked yet${absent.length ? ` (${absent.length})` : ''}`}
+          action={
+            absent.length > 8 && (
+              <input
+                type="search"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filter…"
+                aria-label="Filter students not marked yet"
+                className="!w-40 !py-1"
+              />
+            )
+          }
+        >
+          {!data ? (
+            <Loading />
+          ) : absent.length === 0 ? (
+            <EmptyState>
+              {overview?.total_students
+                ? overview.excused_today
+                  ? 'Everyone is marked present or excused.'
+                  : 'Everyone is marked present.'
+                : 'No students yet. '}
+              {!overview?.total_students && (
+                <a href="#register" className="text-accent underline">
+                  Add the first one
+                </a>
+              )}
+            </EmptyState>
+          ) : (
+            <ul className="max-h-[420px] divide-y divide-stone-100 overflow-y-auto">
+              {absentShown.map((s) => (
+                <li key={s.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{s.name}</div>
+                    <div className="font-mono text-xs text-stone-500">{s.roll_number}</div>
+                  </div>
+                  <div className="flex shrink-0 gap-1.5">
+                    <button
+                      className={`${button.small} text-stone-600 hover:bg-stone-100`}
+                      onClick={() => setExcusing(s)}
+                      title="Medical, leave or college event: won't count against their attendance"
+                    >
+                      Excuse
+                    </button>
+                    <button
+                      className={`${button.small} border border-stone-300 text-stone-700 hover:bg-stone-100`}
+                      disabled={busy === `s${s.id}`}
+                      onClick={() => run(`s${s.id}`, () => markPresent(s.id, lectureId))}
+                    >
+                      {busy === `s${s.id}` ? 'Marking…' : 'Mark present'}
+                    </button>
+                  </div>
+                </li>
               ))}
-            </div>
+            </ul>
           )}
-        </div>
+        </Card>
+
+        <Card title={`Checked in today${present.length ? ` (${present.length})` : ''}`}>
+          {!data ? (
+            <Loading />
+          ) : present.length === 0 ? (
+            <EmptyState>No one has checked in yet today.</EmptyState>
+          ) : (
+            <ul className="max-h-[420px] divide-y divide-stone-100 overflow-y-auto">
+              {present.map((r) => (
+                <li key={r.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{r.student_name}</div>
+                    <div className="font-mono text-xs text-stone-500">
+                      {r.roll_number}
+                      {!lecture && r.lecture_subject && <span className="font-sans"> · {r.lecture_subject}</span>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <LateTag status={r.status} />
+                    <MethodTag method={r.method} />
+                    <span className="font-mono text-xs text-stone-500">{fmtTime(r.attendance_time)}</span>
+                    <button
+                      className={`${button.small} text-stone-500 hover:bg-red-50 hover:text-red-700`}
+                      disabled={busy === `r${r.id}`}
+                      onClick={() => {
+                        if (window.confirm(`Remove today's attendance for ${r.student_name}?`)) {
+                          run(`r${r.id}`, () => deleteAttendance(r.id));
+                        }
+                      }}
+                    >
+                      Undo
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
       </div>
-    </div>
+      {excusing && (
+        <Modal open title={`Excuse ${excusing.name}`} onClose={() => setExcusing(null)}>
+          <ExcuseForm
+            studentId={excusing.id}
+            onCancel={() => setExcusing(null)}
+            onSaved={() => {
+              setExcusing(null);
+              reload();
+            }}
+          />
+        </Modal>
+      )}
+    </>
   );
-};
+}
