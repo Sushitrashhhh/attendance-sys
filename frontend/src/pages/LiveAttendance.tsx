@@ -1,507 +1,362 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import {
-  Camera,
-  CameraOff,
-  ShieldCheck,
-  ShieldAlert,
-  UserCheck,
-  UserX,
-  Clock,
-  RefreshCw,
-  Zap,
-} from 'lucide-react';
-import { fetchTodayAttendance, testRecognitionJson } from '../api/client';
-import type { AttendanceRecord } from '../types';
+import { useEffect, useRef, useState } from 'react';
+import { Camera, FlipHorizontal } from 'lucide-react';
+import { fetchOverview, fetchTodayAttendance, liveSocketUrl, recognizeImage } from '../api/client';
+import { LecturePicker } from '../components/LecturePicker';
+import { Card, EmptyState, ErrorNote, LateTag, MethodTag, PageHeader, button } from '../components/ui';
+import { fmtTime, pct } from '../lib/format';
+import { lectureTime } from '../lib/lectures';
+import { useData } from '../lib/useData';
+import { useLectureChoice } from '../lib/useLectureChoice';
+import type { RecognitionResult } from '../types';
 
-interface LiveDetection {
-  status: 'MATCH' | 'UNKNOWN' | 'NO_FACE' | 'MULTIPLE_FACES' | 'LIVENESS_FAILED' | 'ERROR';
-  student?: {
-    id: number;
-    name: string;
-    roll_number: string;
-    branch?: string;
-  };
-  confidence: number;
-  liveness_score: number;
-  attendance?: 'MARKED' | 'ALREADY_MARKED' | 'NOT_APPLICABLE';
-  message?: string;
-  bbox?: [number, number, number, number];
+const CAPTURE_WIDTH = 480; // frames are downscaled to this width (aspect ratio kept) before upload
+const REPLY_TIMEOUT_MS = 4000; // give up on a lost reply and send the next frame
+
+const COLORS: Partial<Record<RecognitionResult['status'], string>> = {
+  MATCH: '#16a34a',
+  UNKNOWN: '#d97706',
+  LIVENESS_FAILED: '#dc2626',
+};
+const CHALLENGE_COLOR = '#2563eb';
+const NOT_IN_CLASS_COLOR = '#78716c';
+
+const faceColor = (f: RecognitionResult) =>
+  f.attendance === 'CHALLENGE'
+    ? CHALLENGE_COLOR
+    : f.attendance === 'NOT_IN_CLASS'
+      ? NOT_IN_CLASS_COLOR
+      : (COLORS[f.status] ?? '#57534e');
+
+const turnWord = (f: RecognitionResult) => (f.challenge === 'turn_left' ? 'left' : 'right');
+
+interface Frame {
+  faces: RecognitionResult[];
+  w: number; // capture size the bboxes refer to
+  h: number;
 }
 
-export const LiveAttendance: React.FC = () => {
-  const [isActive, setIsActive] = useState(false);
-  const [streamError, setStreamError] = useState<string | null>(null);
-  const [detections, setDetections] = useState<LiveDetection[]>([]);
-  const [recentLogs, setRecentLogs] = useState<AttendanceRecord[]>([]);
-  const [fps, setFps] = useState(0);
+function boxLabel(f: RecognitionResult) {
+  if (f.attendance === 'CHALLENGE') return `${f.student?.name ?? 'Student'}: turn ${turnWord(f)}`;
+  if (f.status === 'MATCH') return `${f.student?.name ?? 'Student'} · ${pct(f.confidence)}`;
+  if (f.status === 'UNKNOWN') return 'Not recognised';
+  if (f.status === 'LIVENESS_FAILED') return 'Liveness check failed';
+  return f.status;
+}
 
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
+function describe(f: RecognitionResult) {
+  if (f.attendance === 'CHALLENGE') return `Turn your head to your ${turnWord(f)}`;
+  if (f.status === 'MATCH') {
+    if (f.attendance === 'MARKED') return f.attendance_status === 'late' ? 'Marked late' : 'Marked present';
+    if (f.attendance === 'ALREADY_MARKED') return 'Already marked';
+    if (f.attendance === 'NOT_IN_CLASS') return "Not in this lecture's class";
+    if (f.attendance === 'CHALLENGE_FAILED') return 'Head turn not detected, try again in a moment';
+    return 'Recognised';
+  }
+  if (f.status === 'UNKNOWN') return 'Not registered, or the face is not clear enough';
+  if (f.status === 'LIVENESS_FAILED') return f.message || 'Looks like a photo or a screen';
+  return f.message || f.status;
+}
+
+export function LiveAttendance() {
+  const [active, setActive] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [frame, setFrame] = useState<Frame | null>(null);
+  const [rate, setRate] = useState(0);
+  const [link, setLink] = useState<'connecting' | 'ws' | 'http'>('connecting');
+  const [mirrored, setMirrored] = useState(false);
+  const [headTurn, setHeadTurn] = useState(true);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const isProcessingRef = useRef<boolean>(false);
-  const animationFrameRef = useRef<number | null>(null);
-  const lastFpsTimeRef = useRef<number>(Date.now());
-  const frameCountRef = useRef<number>(0);
 
-  // Load today's attendance logs
-  const loadRecent = async () => {
-    try {
-      const records = await fetchTodayAttendance();
-      setRecentLogs(records.slice(0, 10));
-    } catch (err) {
-      console.error('Failed to load recent logs:', err);
-    }
-  };
-
+  const choice = useLectureChoice();
+  const { lectureId, lecture } = choice;
+  // Read by the frame loop on every send, so changing these never restarts the camera
+  const settings = useRef({ lectureId, headTurn });
   useEffect(() => {
-    loadRecent();
-  }, []);
+    settings.current = { lectureId, headTurn };
+  }, [lectureId, headTurn]);
 
-  // Initialize camera
-  const startCamera = async () => {
-    setStreamError(null);
+  const today = useData(() => Promise.all([fetchOverview(lectureId), fetchTodayAttendance(lectureId)]), [lectureId], 20000);
+  const reloadToday = today.reload;
+
+  const start = async () => {
+    setError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          facingMode: 'user',
-        },
+      streamRef.current = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
         audio: false,
       });
-
-      streamRef.current = stream;
-      // NOTE: Do NOT try to attach to videoRef here — the <video> element only
-      // exists in the DOM after setIsActive(true) triggers a re-render.
-      // Attachment is handled by the useEffect below.
-      setIsActive(true);
-      connectWebSocket();
-    } catch (err) {
-      setStreamError('Could not access webcam. Please verify permissions.');
-      setIsActive(false);
+      setActive(true);
+    } catch {
+      setError('Could not open the camera. Allow camera access in your browser and try again.');
     }
   };
 
-  // Attach stream to the <video> element once it mounts (i.e. after isActive becomes true).
-  // This is the correct pattern: videoRef.current is guaranteed non-null at this point.
+  // Camera + recognition loop. Runs while active; the cleanup stops everything.
   useEffect(() => {
-    if (isActive && videoRef.current && streamRef.current) {
-      videoRef.current.srcObject = streamRef.current;
-      videoRef.current.play().catch((e) => {
-        console.warn('Video play() failed:', e);
-      });
-    }
-  }, [isActive]);
-
-
-  const stopCamera = () => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
-    setIsActive(false);
-    setDetections([]);
-    isProcessingRef.current = false;
-  };
-
-  // Setup WebSocket connection
-  const connectWebSocket = () => {
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws/live-attendance`;
-
-    try {
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log('Live Attendance WebSocket connected');
-      };
-
-      ws.onmessage = (event) => {
-        isProcessingRef.current = false;
-        try {
-          const data = JSON.parse(event.data);
-          if (data.faces) {
-            setDetections(data.faces);
-
-            // If a student was marked present, refresh today's list
-            const hasNewMark = data.faces.some(
-              (f: LiveDetection) => f.attendance === 'MARKED'
-            );
-            if (hasNewMark) {
-              loadRecent();
-            }
-          }
-        } catch (e) {
-          console.error('Error parsing WS frame:', e);
-        }
-      };
-
-      ws.onerror = (e) => {
-        console.warn('WS error, fallback to HTTP loop will be used:', e);
-        isProcessingRef.current = false;
-      };
-
-      ws.onclose = () => {
-        console.log('WS closed');
-        isProcessingRef.current = false;
-      };
-    } catch (err) {
-      console.warn('Could not connect WS directly:', err);
-    }
-  };
-
-  // Continuous frame capture loop
-  const frameLoop = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !isActive) return;
-
     const video = videoRef.current;
-    const canvas = canvasRef.current;
+    if (!active || !video) return;
 
-    // Calculate FPS
-    frameCountRef.current++;
-    const now = Date.now();
-    if (now - lastFpsTimeRef.current >= 1000) {
-      setFps(frameCountRef.current);
-      frameCountRef.current = 0;
-      lastFpsTimeRef.current = now;
-    }
+    video.srcObject = streamRef.current;
+    video.play().catch(() => {});
 
-    // Capture and send frame if ready
-    if (!isProcessingRef.current && video.readyState >= 2) {
-      isProcessingRef.current = true;
-      canvas.width = 480;
-      canvas.height = 360;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, 480, 360);
-        const frameB64 = canvas.toDataURL('image/jpeg', 0.85);
+    const canvas = document.createElement('canvas');
+    let closed = false;
+    let raf = 0;
+    let waitingSince = 0; // 0 = not waiting for a reply
+    let pending = { w: 0, h: 0 };
+    let replies = 0;
+    let rateWindowStart = performance.now();
 
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ image: frameB64, auto_mark: true }));
+    const handle = (faces: RecognitionResult[]) => {
+      waitingSince = 0;
+      replies++;
+      setFrame({ faces: faces.filter((f) => f.bbox), w: pending.w, h: pending.h });
+      if (faces.some((f) => f.attendance === 'MARKED')) reloadToday();
+    };
+
+    setLink('connecting');
+    const ws = new WebSocket(liveSocketUrl());
+    ws.onopen = () => setLink('ws');
+    ws.onmessage = (ev) => {
+      try {
+        handle(JSON.parse(ev.data).faces ?? []);
+      } catch {
+        waitingSince = 0;
+      }
+    };
+    ws.onclose = () => {
+      waitingSince = 0;
+      if (!closed) setLink('http');
+    };
+
+    const tick = () => {
+      if (closed) return;
+      const now = performance.now();
+      if (now - rateWindowStart >= 1000) {
+        setRate(Math.round((replies * 1000) / (now - rateWindowStart)));
+        replies = 0;
+        rateWindowStart = now;
+      }
+      if (waitingSince && now - waitingSince > REPLY_TIMEOUT_MS) waitingSince = 0;
+
+      const ready = video.readyState >= 2 && video.videoWidth > 0;
+      if (!waitingSince && ready && ws.readyState !== WebSocket.CONNECTING) {
+        const w = CAPTURE_WIDTH;
+        const h = Math.round((CAPTURE_WIDTH * video.videoHeight) / video.videoWidth);
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d')?.drawImage(video, 0, 0, w, h);
+        const image = canvas.toDataURL('image/jpeg', 0.85);
+        pending = { w, h };
+        waitingSince = now;
+
+        const { lectureId: lecture_id, headTurn: challenge } = settings.current;
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ image, auto_mark: true, lecture_id, challenge }));
         } else {
-          // Fallback via HTTP JSON test endpoint
-          testRecognitionJson(frameB64, true)
-            .then((res) => {
-              setDetections([res]);
-              if (res.attendance === 'MARKED') loadRecent();
-            })
-            .catch(() => {})
-            .finally(() => {
-              isProcessingRef.current = false;
+          // The head-turn check needs the live connection; without it, only recognise, never mark
+          recognizeImage(image, !challenge, lecture_id)
+            .then((r) => !closed && handle([r]))
+            .catch(() => {
+              waitingSince = 0;
             });
         }
-      } else {
-        isProcessingRef.current = false;
       }
-    }
-
-    animationFrameRef.current = requestAnimationFrame(frameLoop);
-  }, [isActive]);
-
-  useEffect(() => {
-    if (isActive) {
-      animationFrameRef.current = requestAnimationFrame(frameLoop);
-    }
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
+      raf = requestAnimationFrame(tick);
     };
-  }, [isActive, frameLoop]);
+    raf = requestAnimationFrame(tick);
 
-  // Render HUD Overlay
+    return () => {
+      closed = true;
+      cancelAnimationFrame(raf);
+      ws.close();
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      video.srcObject = null;
+      setFrame(null);
+      setRate(0);
+    };
+  }, [active, reloadToday]);
+
+  // Draw face boxes. The video uses object-contain, so map capture coords through the same letterboxing.
   useEffect(() => {
-    if (!overlayCanvasRef.current || !videoRef.current) return;
-    const overlay = overlayCanvasRef.current;
-    const video = videoRef.current;
-
-    overlay.width = video.clientWidth || 640;
-    overlay.height = video.clientHeight || 480;
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const W = overlay.clientWidth;
+    const H = overlay.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    overlay.width = W * dpr;
+    overlay.height = H * dpr;
     const ctx = overlay.getContext('2d');
     if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    if (!frame || !frame.w) return;
 
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const s = Math.min(W / frame.w, H / frame.h);
+    const offX = (W - frame.w * s) / 2;
+    const offY = (H - frame.h * s) / 2;
+    ctx.font = '500 13px "IBM Plex Sans", system-ui, sans-serif';
+    ctx.lineWidth = 2;
 
-    if (!isActive) return;
+    for (const f of frame.faces) {
+      const [bx, by, bw, bh] = f.bbox!;
+      const w = bw * s;
+      const h = bh * s;
+      const y = offY + by * s;
+      const x = mirrored ? W - (offX + (bx + bw) * s) : offX + bx * s;
+      const color = faceColor(f);
 
-    detections.forEach((det) => {
-      if (!det.bbox) return;
-      // Scale coordinates from capture size (480x360 or original) to client display
-      const scaleX = overlay.width / 480;
-      const scaleY = overlay.height / 360;
-      const [bx, by, bw, bh] = det.bbox;
-      const x = bx * scaleX;
-      const y = by * scaleY;
-      const w = bw * scaleX;
-      const h = bh * scaleY;
-
-      // Color coding based on status
-      let strokeColor = '#3b82f6'; // Blue default
-      let label = 'RECOGNIZING...';
-
-      if (det.status === 'MATCH') {
-        strokeColor = '#10b981'; // Emerald green
-        label = `${det.student?.name || 'STUDENT'} (${Math.round(det.confidence * 100)}%)`;
-      } else if (det.status === 'UNKNOWN') {
-        strokeColor = '#f59e0b'; // Amber
-        label = 'UNKNOWN FACE';
-      } else if (det.status === 'LIVENESS_FAILED') {
-        strokeColor = '#ef4444'; // Red
-        label = 'SPOOF / LIVENESS FAILED';
-      }
-
-      // Draw bounding box
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = 3;
+      ctx.strokeStyle = color;
       ctx.strokeRect(x, y, w, h);
 
-      // Draw corner accents
-      const cornerLength = Math.min(18, w * 0.2);
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      // Top-Left
-      ctx.moveTo(x, y + cornerLength);
-      ctx.lineTo(x, y);
-      ctx.lineTo(x + cornerLength, y);
-      // Top-Right
-      ctx.moveTo(x + w - cornerLength, y);
-      ctx.lineTo(x + w, y);
-      ctx.lineTo(x + w, y + cornerLength);
-      // Bottom-Left
-      ctx.moveTo(x, y + h - cornerLength);
-      ctx.lineTo(x, y + h);
-      ctx.lineTo(x + cornerLength, y + h);
-      // Bottom-Right
-      ctx.moveTo(x + w - cornerLength, y + h);
-      ctx.lineTo(x + w, y + h);
-      ctx.lineTo(x + w, y + h - cornerLength);
-      ctx.stroke();
+      const label = boxLabel(f);
+      const labelW = ctx.measureText(label).width + 12;
+      const labelY = y >= 22 ? y - 22 : y + h;
+      ctx.fillStyle = color;
+      ctx.fillRect(x - 1, labelY, labelW, 22);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(label, x + 5, labelY + 15);
+    }
+  }, [frame, mirrored]);
 
-      // Label background
-      ctx.fillStyle = strokeColor;
-      ctx.font = 'bold 12px sans-serif';
-      const textMetrics = ctx.measureText(label);
-      ctx.fillRect(x, Math.max(0, y - 24), textMetrics.width + 16, 24);
-
-      // Label text
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(label, x + 8, Math.max(16, y - 7));
-    });
-  }, [detections, isActive]);
-
-  useEffect(() => {
-    return () => {
-      stopCamera();
-    };
-  }, []);
+  const [overview, records] = today.data ?? [null, []];
+  const faces = frame?.faces ?? [];
+  const prompt = faces.find((f) => f.attendance === 'CHALLENGE');
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-            <Camera className="h-6 w-6 text-blue-400" />
-            Live Biometric Attendance Portal
-          </h1>
-          <p className="text-sm text-slate-400 mt-1">
-            Continuous YuNet detection &bull; ArcFace 512-D vector search &bull; Passive Anti-Spoofing &bull; Real-time pgvector matching
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {isActive && (
-            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-xs text-slate-300 font-mono">
-              <Zap className="h-3.5 w-3.5 text-amber-400" />
-              <span>{fps} FPS</span>
-            </div>
-          )}
-
-          {isActive ? (
-            <button
-              onClick={stopCamera}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-semibold transition-all shadow-lg shadow-red-600/20"
-            >
-              <CameraOff className="h-4 w-4" />
-              <span>Stop Camera</span>
+    <>
+      <PageHeader
+        title="Take attendance"
+        subtitle="Students are marked present automatically when the camera recognises them."
+      >
+        <LecturePicker lectures={choice.lectures} value={lectureId} onChange={choice.choose} />
+        <label className="flex items-center gap-2 text-sm text-stone-600" title="Ask each student to turn their head before marking. Stops photos and phone screens.">
+          <input type="checkbox" checked={headTurn} onChange={(e) => setHeadTurn(e.target.checked)} className="accent-accent" />
+          Head-turn check
+        </label>
+        {active ? (
+          <>
+            <button className={button.secondary} onClick={() => setMirrored((m) => !m)} aria-pressed={mirrored}>
+              <FlipHorizontal className="h-4 w-4" />
+              {mirrored ? 'Mirrored' : 'Mirror view'}
             </button>
-          ) : (
-            <button
-              onClick={startCamera}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-all shadow-lg shadow-blue-600/25"
-            >
-              <Camera className="h-4 w-4" />
-              <span>Start Camera</span>
+            <button className={button.secondary} onClick={() => setActive(false)}>
+              Stop camera
             </button>
-          )}
-        </div>
-      </div>
+          </>
+        ) : (
+          <button className={button.primary} onClick={start}>
+            <Camera className="h-4 w-4" />
+            Start camera
+          </button>
+        )}
+      </PageHeader>
 
-      {streamError && (
-        <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-          {streamError}
-        </div>
-      )}
+      {error && <ErrorNote message={error} />}
 
-      {/* Main Split Grid: Camera HUD + Live Activity Feed */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Camera Viewport (2 cols) */}
-        <div className="lg:col-span-2 space-y-4">
-          <div className="relative aspect-video rounded-2xl bg-slate-950 border border-slate-800 overflow-hidden shadow-2xl flex items-center justify-center">
-            {isActive ? (
-              <div className="relative w-full h-full">
-                <video
-                  ref={videoRef}
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover -scale-x-100"
-                />
-                <canvas
-                  ref={overlayCanvasRef}
-                  className="absolute inset-0 w-full h-full pointer-events-none -scale-x-100"
-                />
-                {/* Live Badge */}
-                <div className="absolute top-3 left-3 bg-slate-950/80 backdrop-blur-md border border-slate-800 px-3 py-1 rounded-full text-xs font-semibold text-white flex items-center gap-2 shadow-lg">
-                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <span>VISION RUNTIME ACTIVE</span>
-                </div>
+      <div className="grid gap-6 lg:grid-cols-3">
+        <div className="space-y-3 lg:col-span-2">
+          <div className="relative aspect-[4/3] overflow-hidden rounded-lg bg-stone-900">
+            <video
+              ref={videoRef}
+              playsInline
+              muted
+              className={`h-full w-full object-contain ${mirrored ? '-scale-x-100' : ''} ${active ? '' : 'invisible'}`}
+            />
+            <canvas ref={overlayRef} className="pointer-events-none absolute inset-0 h-full w-full" />
+            {prompt && (
+              <div role="status" className="absolute inset-x-0 bottom-4 mx-auto w-fit max-w-[90%] rounded-md bg-white/95 px-4 py-2 text-center text-lg font-medium text-stone-900 shadow">
+                {prompt.student?.name}, turn your head to your <strong>{turnWord(prompt)}</strong>
               </div>
-            ) : (
-              <div className="text-center p-8 space-y-3">
-                <div className="h-16 w-16 mx-auto rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-500">
-                  <Camera className="h-8 w-8" />
-                </div>
-                <h3 className="text-lg font-semibold text-white">Camera Standby</h3>
-                <p className="text-xs text-slate-400 max-w-sm mx-auto">
-                  Click <strong>Start Camera</strong> to begin live multi-face tracking and attendance verification.
-                </p>
-                <button
-                  onClick={startCamera}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-lg shadow-blue-600/20 transition-all"
-                >
+            )}
+            {!active && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center">
+                <p className="text-sm text-stone-400">Camera is off</p>
+                <button className={button.primary} onClick={start}>
                   <Camera className="h-4 w-4" />
-                  Launch Camera Stream
+                  Start camera
                 </button>
               </div>
             )}
           </div>
 
-          <canvas ref={canvasRef} className="hidden" />
+          {active && (
+            <p className="flex items-center gap-2 text-xs text-stone-500">
+              <span className={`h-2 w-2 rounded-full ${link === 'connecting' ? 'bg-stone-300' : 'bg-emerald-500'}`} />
+              {link === 'connecting' ? 'Connecting…' : `${rate} frame${rate === 1 ? '' : 's'}/s`}
+              {link === 'http' &&
+                (headTurn
+                  ? ' · live connection unavailable: recognising only, not marking (head-turn check needs it)'
+                  : ' · live connection unavailable, using slower fallback')}
+            </p>
+          )}
 
-          {/* Current Detection HUD Pill */}
-          {detections.length > 0 && (
-            <div className="glass-panel p-4 rounded-xl border border-slate-800 flex flex-wrap items-center justify-between gap-4">
-              {detections.map((det, i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <div
-                    className={`h-10 w-10 rounded-xl flex items-center justify-center font-bold text-sm ${
-                      det.status === 'MATCH'
-                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                        : det.status === 'UNKNOWN'
-                        ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                        : 'bg-red-500/20 text-red-400 border border-red-500/30'
-                    }`}
-                  >
-                    {det.status === 'MATCH' ? (
-                      <UserCheck className="h-5 w-5" />
-                    ) : det.status === 'UNKNOWN' ? (
-                      <UserX className="h-5 w-5" />
-                    ) : (
-                      <ShieldAlert className="h-5 w-5" />
-                    )}
-                  </div>
-                  <div>
-                    <div className="text-sm font-semibold text-white">
-                      {det.status === 'MATCH'
-                        ? det.student?.name
-                        : det.status === 'UNKNOWN'
-                        ? 'Unregistered Person'
-                        : det.status}
-                    </div>
-                    <div className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
-                      {det.student && (
-                        <span className="font-mono text-blue-400 font-semibold">
-                          {det.student.roll_number}
-                        </span>
-                      )}
-                      <span>Cosine Conf: {Math.round(det.confidence * 100)}%</span>
-                      <span>Liveness: {Math.round(det.liveness_score * 100)}%</span>
-                    </div>
-                  </div>
-
-                  {det.attendance && (
-                    <span
-                      className={`ml-auto px-2.5 py-1 rounded-full text-xs font-semibold border ${
-                        det.attendance === 'MARKED'
-                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-                          : 'bg-blue-500/20 text-blue-400 border-blue-500/30'
-                      }`}
-                    >
-                      {det.attendance === 'MARKED' ? 'ATTENDANCE MARKED' : 'ALREADY MARKED'}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
+          {active && (
+            <Card title="In view">
+              {faces.length === 0 ? (
+                <EmptyState>No faces in view. Stand about an arm's length from the camera.</EmptyState>
+              ) : (
+                <ul className="divide-y divide-stone-100">
+                  {faces.map((f, i) => (
+                    <li key={f.student?.id ?? `u${i}`} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: faceColor(f) }} />
+                      <span className="font-medium">
+                        {f.student ? f.student.name : 'Unknown person'}
+                        {f.student && <span className="ml-2 font-mono text-xs font-normal text-stone-500">{f.student.roll_number}</span>}
+                      </span>
+                      <span className="ml-auto text-right text-stone-500">{describe(f)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
           )}
         </div>
 
-        {/* Live Activity Feed (1 col) */}
-        <div className="glass-panel p-5 rounded-2xl border border-slate-800 flex flex-col h-full space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-            <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-              <Clock className="h-4 w-4 text-blue-400" />
-              Today's Live Activity
-            </h2>
-            <button
-              onClick={loadRecent}
-              className="p-1 rounded text-slate-400 hover:text-white"
-              title="Refresh"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-            </button>
-          </div>
+        <div className="space-y-6">
+          <Card className="p-4">
+            <div className="text-sm text-stone-500">
+              {lecture ? `Present in ${lecture.subject} (${lectureTime(lecture)})` : 'Present today'}
+            </div>
+            <div className="mt-1 text-2xl font-semibold tabular-nums">
+              {overview ? overview.present_today : '–'}
+              <span className="text-base font-normal text-stone-400"> / {overview ? overview.total_students : '–'}</span>
+            </div>
+            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-stone-100">
+              <div
+                className="h-full rounded-full bg-accent transition-[width]"
+                style={{ width: `${overview?.total_students ? (overview.present_today / overview.total_students) * 100 : 0}%` }}
+              />
+            </div>
+          </Card>
 
-          <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 max-h-[480px]">
-            {recentLogs.length === 0 ? (
-              <div className="text-center py-12 text-slate-500 text-xs">
-                No attendance records marked yet today. Start camera to verify students.
-              </div>
+          <Card title="Latest check-ins" action={<a href="#overview" className="text-xs text-accent hover:underline">See all</a>}>
+            {records.length === 0 ? (
+              <EmptyState>No check-ins yet today.</EmptyState>
             ) : (
-              recentLogs.map((log) => (
-                <div
-                  key={log.id}
-                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 flex items-center justify-between gap-3 text-xs"
-                >
-                  <div>
-                    <div className="font-medium text-white">{log.student_name || 'Student'}</div>
-                    <div className="text-slate-400 font-mono text-[11px]">
-                      {log.roll_number} &bull; {log.attendance_time}
+              <ul className="max-h-[420px] divide-y divide-stone-100 overflow-y-auto">
+                {records.slice(0, 12).map((r) => (
+                  <li key={r.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{r.student_name}</div>
+                      <div className="font-mono text-xs text-stone-500">{r.roll_number}</div>
                     </div>
-                  </div>
-                  <div className="text-right">
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px]">
-                      <ShieldCheck className="h-3 w-3" />
-                      {Math.round(log.confidence * 100)}%
-                    </span>
-                  </div>
-                </div>
-              ))
+                    <div className="flex items-center gap-2">
+                      <LateTag status={r.status} />
+                      {r.method === 'manual' && <MethodTag method="manual" />}
+                      <span className="font-mono text-xs text-stone-500">{fmtTime(r.attendance_time)}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             )}
-          </div>
+          </Card>
         </div>
       </div>
-    </div>
+    </>
   );
-};
+}

@@ -8,6 +8,8 @@ from app.api.students import router as students_router
 from app.api.attendance import router as attendance_router
 from app.api.analytics import router as analytics_router
 from app.api.recognition import router as recognition_router
+from app.api.lectures import router as lectures_router
+from app.api.excusals import router as excusals_router
 
 # Configure clean, structured logging (secrets & raw biometrics are strictly excluded)
 logging.basicConfig(
@@ -58,6 +60,8 @@ app.include_router(students_router)
 app.include_router(attendance_router)
 app.include_router(analytics_router)
 app.include_router(recognition_router)
+app.include_router(lectures_router)
+app.include_router(excusals_router)
 
 # Mount direct WebSocket endpoint for live camera feed
 app.add_api_websocket_route("/ws/live-attendance", websocket_recognition)

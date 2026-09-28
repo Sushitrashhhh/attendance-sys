@@ -1,216 +1,186 @@
-import React, { useState, useEffect } from 'react';
-import {
-  ClipboardList,
-  Search,
-  Calendar,
-  Download,
-  RefreshCw,
-  CheckCircle2,
-  ShieldCheck,
-} from 'lucide-react';
-import { fetchAttendance } from '../api/client';
+import { useEffect, useState } from 'react';
+import { Download } from 'lucide-react';
+import { attendanceExportUrl, deleteAttendance, fetchAttendance, fetchLectures } from '../api/client';
+import { Card, EmptyState, ErrorNote, LateTag, Loading, MethodTag, PageHeader, Pager, button, table } from '../components/ui';
+import { lectureTime, WEEKDAYS } from '../lib/lectures';
+import { fmtDate, fmtTime, isoDate, pct } from '../lib/format';
+import { useData } from '../lib/useData';
 import type { AttendanceRecord } from '../types';
 
-export const AttendanceRecords: React.FC = () => {
-  const [records, setRecords] = useState<AttendanceRecord[]>([]);
-  const [total, setTotal] = useState(0);
-  const [dateFilter, setDateFilter] = useState('');
-  const [searchTerm, setSearchTerm] = useState('');
-  const [loading, setLoading] = useState(true);
+const PAGE_SIZE = 50;
 
-  const loadData = async () => {
-    setLoading(true);
+export function AttendanceRecords() {
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [lectureId, setLectureId] = useState<number | undefined>(undefined);
+  const [skip, setSkip] = useState(0);
+  const lectures = useData(fetchLectures, []);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQuery(search.trim());
+      setSkip(0);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const changeRange = (f: string, t: string) => {
+    setFrom(f);
+    setTo(t);
+    setSkip(0);
+  };
+
+  const filters = { search: query, date_from: from, date_to: to, lecture_id: lectureId };
+  const { data, error, reload } = useData(
+    () => fetchAttendance({ ...filters, skip, limit: PAGE_SIZE }),
+    [query, from, to, lectureId, skip]
+  );
+
+  const setRange = (days: number | null) => {
+    changeRange(days === null ? '' : isoDate(-(days - 1)), days === null ? '' : isoDate());
+  };
+
+  const remove = async (r: AttendanceRecord) => {
+    if (!window.confirm(`Remove ${r.student_name}'s attendance on ${fmtDate(r.attendance_date)}?`)) return;
+    setActionError(null);
     try {
-      const res = await fetchAttendance({
-        date: dateFilter || undefined,
-        limit: 100,
-      });
-      setRecords(res.items);
-      setTotal(res.total);
-    } catch (err) {
-      console.error('Failed to fetch attendance:', err);
-    } finally {
-      setLoading(false);
+      await deleteAttendance(r.id);
+      reload();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Could not remove the record.');
     }
   };
 
-  useEffect(() => {
-    loadData();
-  }, [dateFilter]);
-
-  // Filter client-side by search term
-  const filteredRecords = records.filter((r) => {
-    if (!searchTerm.trim()) return true;
-    const term = searchTerm.toLowerCase();
-    return (
-      (r.student_name && r.student_name.toLowerCase().includes(term)) ||
-      (r.roll_number && r.roll_number.toLowerCase().includes(term)) ||
-      (r.branch && r.branch.toLowerCase().includes(term))
-    );
-  });
-
-  // Export CSV
-  const exportCsv = () => {
-    if (filteredRecords.length === 0) return;
-    const headers = ['ID', 'Student Name', 'Roll Number', 'Branch', 'Date', 'Time', 'Status', 'Confidence', 'Liveness Score'];
-    const rows = filteredRecords.map((r) => [
-      r.id,
-      `"${r.student_name || ''}"`,
-      r.roll_number || '',
-      `"${r.branch || ''}"`,
-      r.attendance_date,
-      r.attendance_time,
-      r.status,
-      r.confidence,
-      r.liveness_score,
-    ]);
-
-    const csvContent = [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', `attendance_export_${dateFilter || 'all'}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
+  const total = data?.total ?? 0;
+  const invalidRange = !!from && !!to && from > to;
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight flex items-center space-x-2">
-            <ClipboardList className="h-6 w-6 text-blue-400" />
-            <span>Attendance History & Audits</span>
-          </h1>
-          <p className="text-sm text-slate-400 mt-1">
-            Immutable attendance logs backed by Neon PostgreSQL with exact timestamps and liveness scores.
-          </p>
-        </div>
+    <>
+      <PageHeader title="Records" subtitle="Every check-in, newest first.">
+        <a
+          href={attendanceExportUrl(filters)}
+          download
+          className={`${button.secondary} ${total === 0 ? 'pointer-events-none opacity-50' : ''}`}
+          aria-disabled={total === 0}
+        >
+          <Download className="h-4 w-4" />
+          Export CSV{total > 0 ? ` (${total})` : ''}
+        </a>
+      </PageHeader>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={loadData}
-            className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white transition-colors"
-            title="Refresh"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin text-blue-400' : ''}`} />
-          </button>
-          <button
-            onClick={exportCsv}
-            disabled={filteredRecords.length === 0}
-            className={`inline-flex items-center space-x-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all ${
-              filteredRecords.length > 0
-                ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/20'
-                : 'bg-slate-900 border border-slate-800 text-slate-500 cursor-not-allowed'
-            }`}
-          >
-            <Download className="h-4 w-4" />
-            <span>Export CSV</span>
-          </button>
-        </div>
-      </div>
+      {(error || actionError) && <ErrorNote message={(error || actionError)!} />}
 
-      {/* Filter and Search Bar */}
-      <div className="glass-panel rounded-xl p-4 border border-slate-800 flex flex-wrap items-center gap-3">
-        <div className="flex-1 min-w-[200px] relative">
-          <Search className="h-4 w-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+      <Card>
+        <div className="flex flex-wrap items-end gap-3 border-b border-stone-200 p-3">
           <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Search by student name or roll number..."
-            className="w-full pl-9 pr-4 py-2 rounded-lg bg-slate-900 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Name, roll number or branch"
+            aria-label="Search records"
+            className="w-full sm:w-64"
           />
-        </div>
-
-        <div className="flex items-center space-x-2">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300">
-            <Calendar className="h-3.5 w-3.5 text-blue-400" />
-            <input
-              type="date"
-              value={dateFilter}
-              onChange={(e) => setDateFilter(e.target.value)}
-              className="bg-transparent border-none focus:outline-none text-xs text-white"
-            />
-          </div>
-          {dateFilter && (
-            <button
-              onClick={() => setDateFilter('')}
-              className="text-xs text-slate-400 hover:text-white px-2 py-1.5 rounded bg-slate-800"
-            >
-              All Dates
-            </button>
+          <label className="flex items-center gap-2 text-sm text-stone-600">
+            From
+            <input type="date" value={from} max={to || undefined} onChange={(e) => changeRange(e.target.value, to)} />
+          </label>
+          <label className="flex items-center gap-2 text-sm text-stone-600">
+            To
+            <input type="date" value={to} min={from || undefined} onChange={(e) => changeRange(from, e.target.value)} />
+          </label>
+          {(lectures.data?.length ?? 0) > 0 && (
+            <label className="flex items-center gap-2 text-sm text-stone-600">
+              Lecture
+              <select
+                value={lectureId ?? ''}
+                onChange={(e) => {
+                  setLectureId(e.target.value ? Number(e.target.value) : undefined);
+                  setSkip(0);
+                }}
+                className="max-w-[14rem]"
+              >
+                <option value="">All</option>
+                {lectures.data!.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.subject} · {WEEKDAYS[l.weekday].slice(0, 3)} {lectureTime(l)}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
+          <div className="flex gap-1 text-sm">
+            <button className={`${button.small} text-stone-600 hover:bg-stone-100`} onClick={() => setRange(1)}>
+              Today
+            </button>
+            <button className={`${button.small} text-stone-600 hover:bg-stone-100`} onClick={() => setRange(7)}>
+              Last 7 days
+            </button>
+            <button className={`${button.small} text-stone-600 hover:bg-stone-100`} onClick={() => setRange(30)}>
+              Last 30 days
+            </button>
+            {(from || to) && (
+              <button className={`${button.small} text-stone-600 hover:bg-stone-100`} onClick={() => setRange(null)}>
+                All dates
+              </button>
+            )}
+          </div>
         </div>
-      </div>
 
-      {/* Table Container */}
-      <div className="glass-panel rounded-xl border border-slate-800 overflow-hidden shadow-xl">
-        {loading ? (
-          <div className="p-12 text-center text-slate-400 text-sm">
-            <RefreshCw className="h-8 w-8 text-blue-400 animate-spin mx-auto mb-3" />
-            Loading attendance records from Neon...
-          </div>
-        ) : filteredRecords.length === 0 ? (
-          <div className="p-12 text-center space-y-3">
-            <ClipboardList className="h-12 w-12 mx-auto text-slate-600" />
-            <h3 className="text-base font-semibold text-white">No Attendance Records Found</h3>
-            <p className="text-xs text-slate-400 max-w-sm mx-auto">
-              {dateFilter || searchTerm
-                ? 'No records match your selected filters. Try adjusting the search or date.'
-                : 'Verified facial attendance check-ins will populate this ledger with timestamps and confidence scores.'}
-            </p>
-          </div>
+        {invalidRange ? (
+          <EmptyState>The “From” date is after the “To” date.</EmptyState>
+        ) : !data ? (
+          <Loading />
+        ) : data.items.length === 0 ? (
+          <EmptyState>{query || from || to || lectureId ? 'No records match these filters.' : 'No attendance has been taken yet.'}</EmptyState>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm text-slate-300">
-              <thead className="bg-slate-900/80 border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400">
+          <div className={table.wrap}>
+            <table className={table.el}>
+              <thead>
                 <tr>
-                  <th className="px-6 py-4">Student</th>
-                  <th className="px-6 py-4">Roll Number</th>
-                  <th className="px-6 py-4">Branch</th>
-                  <th className="px-6 py-4">Date</th>
-                  <th className="px-6 py-4">Time</th>
-                  <th className="px-6 py-4">Status</th>
-                  <th className="px-6 py-4">Confidence</th>
-                  <th className="px-6 py-4">Liveness</th>
+                  <th className={table.th}>Date</th>
+                  <th className={table.th}>Time</th>
+                  <th className={table.th}>Student</th>
+                  <th className={table.th}>Lecture</th>
+                  <th className={table.th}>How</th>
+                  <th className={`${table.th} text-right`} title="Face match confidence">
+                    Match
+                  </th>
+                  <th className={`${table.th} text-right`} title="Liveness (anti-spoofing) score">
+                    Liveness
+                  </th>
+                  <th className={table.th}>
+                    <span className="sr-only">Actions</span>
+                  </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {filteredRecords.map((r) => (
-                  <tr key={r.id} className="hover:bg-slate-900/40 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap font-medium text-white">
-                      {r.student_name || `Student #${r.student_id}`}
+              <tbody>
+                {data.items.map((r) => (
+                  <tr key={r.id} className="hover:bg-stone-50">
+                    <td className={`${table.td} whitespace-nowrap`}>{fmtDate(r.attendance_date)}</td>
+                    <td className={`${table.td} font-mono text-xs`}>{fmtTime(r.attendance_time)}</td>
+                    <td className={table.td}>
+                      <div className="font-medium">{r.student_name}</div>
+                      <div className="font-mono text-xs text-stone-500">{r.roll_number}</div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap font-mono text-xs text-blue-400 font-semibold">
-                      {r.roll_number || '—'}
+                    <td className={table.td}>
+                      <div>{r.lecture_subject ?? <span className="text-stone-400">Whole day</span>}</div>
+                      <div className="text-xs text-stone-500">{r.branch}</div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-slate-300">
-                      {r.branch || '—'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-slate-400 font-mono text-xs">
-                      {r.attendance_date}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-slate-400 font-mono text-xs">
-                      {r.attendance_time}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                        <CheckCircle2 className="h-3 w-3" />
-                        Present
+                    <td className={table.td}>
+                      <span className="inline-flex gap-1">
+                        <MethodTag method={r.method} />
+                        <LateTag status={r.status} />
                       </span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-300">
-                      <span className="font-mono">{Math.round(r.confidence * 100)}%</span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-300">
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded font-mono bg-slate-900 border border-slate-800 text-emerald-400">
-                        <ShieldCheck className="h-3 w-3" />
-                        {Math.round(r.liveness_score * 100)}%
-                      </span>
+                    <td className={`${table.td} text-right tabular-nums`}>{r.method === 'face' ? pct(r.confidence) : '–'}</td>
+                    <td className={`${table.td} text-right tabular-nums`}>{r.method === 'face' ? pct(r.liveness_score) : '–'}</td>
+                    <td className={`${table.td} text-right`}>
+                      <button className={`${button.small} text-stone-500 hover:bg-red-50 hover:text-red-700`} onClick={() => remove(r)}>
+                        Remove
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -218,12 +188,8 @@ export const AttendanceRecords: React.FC = () => {
             </table>
           </div>
         )}
-
-        <div className="px-6 py-3 bg-slate-900/50 border-t border-slate-800/80 text-xs text-slate-400 flex items-center justify-between">
-          <span>Showing {filteredRecords.length} of {total} records</span>
-          <span>Constraint enforced: UNIQUE(student_id, attendance_date)</span>
-        </div>
-      </div>
-    </div>
+        {!invalidRange && <Pager skip={skip} limit={PAGE_SIZE} total={total} onChange={setSkip} />}
+      </Card>
+    </>
   );
-};
+}

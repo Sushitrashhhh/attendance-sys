@@ -1,7 +1,11 @@
 from typing import List, Optional, Tuple
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func, or_
-from app.db.models import Student
+from sqlalchemy import delete, select, func, or_, union_all
+from app.db.models import FaceSample, Student
+
+
+def _similarity(cosine_distance) -> float:
+    return max(0.0, min(1.0, 1.0 - float(cosine_distance)))
 
 
 class StudentRepository:
@@ -70,6 +74,18 @@ class StudentRepository:
 
         return items, total
 
+    def update(self, student: Student, **fields) -> Student:
+        for key, value in fields.items():
+            if value is None:
+                continue
+            value = value.strip() if isinstance(value, str) else value
+            if key == "roll_number":
+                value = value.upper()
+            setattr(student, key, value)
+        self.db.commit()
+        self.db.refresh(student)
+        return student
+
     def delete(self, student_id: int) -> bool:
         student = self.get_by_id(student_id)
         if not student:
@@ -80,26 +96,59 @@ class StudentRepository:
         self.db.commit()
         return True
 
-    def find_nearest(
+    def match(
         self, query_embedding: List[float]
-    ) -> Optional[Tuple[Student, float]]:
+    ) -> Optional[Tuple[Student, float, float]]:
         """
-        Query Neon pgvector for the closest student biometric vector using cosine distance (<=>).
-        Cosine distance in pgvector is 1 - cosine_similarity (for normalized vectors).
-        Returns: Tuple[Student, similarity_score] where similarity_score = 1 - distance,
-        or None if no students exist.
+        Closest student by cosine distance (<=>) over the enrollment embedding AND any learned
+        face samples. Returns (student, similarity, runner_up_similarity) where runner-up is the
+        best score of any *other* student (0.0 if none), or None if no students exist.
         """
-        distance_col = Student.embedding.cosine_distance(query_embedding).label("distance")
-        stmt = (
-            select(Student, distance_col)
+        enrolled = select(
+            Student.id.label("sid"),
+            Student.embedding.cosine_distance(query_embedding).label("d"),
+        ).where(Student.active.is_(True))
+        learned = (
+            select(
+                FaceSample.student_id.label("sid"),
+                FaceSample.embedding.cosine_distance(query_embedding).label("d"),
+            )
+            .join(Student, Student.id == FaceSample.student_id)
             .where(Student.active.is_(True))
-            .order_by(distance_col.asc())
-            .limit(1)
         )
-        result = self.db.execute(stmt).first()
-        if not result:
+        candidates = union_all(enrolled, learned).subquery()
+        best_d = func.min(candidates.c.d).label("best_d")
+        top2 = self.db.execute(
+            select(candidates.c.sid, best_d).group_by(candidates.c.sid).order_by(best_d.asc()).limit(2)
+        ).all()
+        if not top2:
             return None
 
-        student, distance = result
-        similarity = max(0.0, min(1.0, 1.0 - float(distance)))
-        return student, similarity
+        student = self.db.get(Student, top2[0].sid)
+        runner_up = _similarity(top2[1].best_d) if len(top2) > 1 else 0.0
+        return student, _similarity(top2[0].best_d), runner_up
+
+    def find_nearest(self, query_embedding: List[float]) -> Optional[Tuple[Student, float]]:
+        """Closest student and similarity (see match)."""
+        result = self.match(query_embedding)
+        return (result[0], result[1]) if result else None
+
+    def add_face_sample(self, student_id: int, embedding: List[float], similarity: float, keep: int) -> None:
+        """Store a learned embedding, keeping only the `keep` most recent samples per student."""
+        self.db.add(FaceSample(student_id=student_id, embedding=embedding, similarity=round(similarity, 4)))
+        self.db.flush()
+        stale = self.db.execute(
+            select(FaceSample.id)
+            .where(FaceSample.student_id == student_id)
+            .order_by(FaceSample.created_at.desc(), FaceSample.id.desc())
+            .offset(keep)
+        ).scalars().all()
+        if stale:
+            self.db.execute(delete(FaceSample).where(FaceSample.id.in_(stale)))
+        self.db.commit()
+
+    def clear_face_samples(self, student_id: int) -> int:
+        """Forget everything learned for a student; recognition falls back to the enrollment photo."""
+        removed = self.db.execute(delete(FaceSample).where(FaceSample.student_id == student_id)).rowcount
+        self.db.commit()
+        return removed or 0

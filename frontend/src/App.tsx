@@ -1,70 +1,65 @@
-import { useState, useEffect } from 'react';
-import { Navbar, type NavTab } from './components/Navbar';
+import { lazy, Suspense, useEffect, useState } from 'react';
+import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './pages/Dashboard';
 import { LiveAttendance } from './pages/LiveAttendance';
 import { RegisterStudent } from './pages/RegisterStudent';
 import { StudentsList } from './pages/StudentsList';
 import { AttendanceRecords } from './pages/AttendanceRecords';
-import { Analytics } from './pages/Analytics';
 import { Anomalies } from './pages/Anomalies';
+import { Timetable } from './pages/Timetable';
+import { SelfCheck } from './pages/SelfCheck';
 import { fetchHealth } from './api/client';
-import type { HealthStatus } from './types';
+import { Loading } from './components/ui';
+import { useData } from './lib/useData';
+import type { Page } from './types';
+
+// Reports pulls in the charting library; load it only when opened
+const Analytics = lazy(() => import('./pages/Analytics').then((m) => ({ default: m.Analytics })));
+
+const PAGES: Page[] = ['overview', 'live', 'students', 'register', 'records', 'reports', 'timetable', 'flags', 'self'];
+
+const pageFromHash = (): Page => {
+  const hash = window.location.hash.slice(1) as Page;
+  return PAGES.includes(hash) ? hash : 'overview';
+};
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
-  const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [page, setPage] = useState<Page>(pageFromHash);
+  const { data: health } = useData(fetchHealth, [], 15000);
 
   useEffect(() => {
-    let isMounted = true;
-
-    const checkHealth = async () => {
-      const data = await fetchHealth();
-      if (isMounted) {
-        setHealth(data);
-      }
+    const onHash = () => {
+      setPage(pageFromHash());
+      window.scrollTo(0, 0);
     };
-
-    checkHealth();
-    const interval = setInterval(checkHealth, 10000);
-
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
   return (
-    <div className="min-h-screen bg-slate-950 flex flex-col selection:bg-blue-500/30 selection:text-white">
-      <Navbar activeTab={activeTab} setActiveTab={setActiveTab} health={health} />
-
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {activeTab === 'dashboard' && (
-          <Dashboard
-            health={health}
-            onNavigateToLive={() => setActiveTab('live')}
-            onNavigateToRegister={() => setActiveTab('register')}
-          />
+    <div className="min-h-screen">
+      <Sidebar page={page} health={health} />
+      <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 md:ml-56 md:py-8 lg:px-10">
+        {health && health.database !== 'connected' && (
+          <div role="alert" className="mb-6 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            Can't reach the server or database. Check that the backend is running.
+            {health.details?.error && <span className="block text-xs text-red-700/80">{health.details.error}</span>}
+          </div>
         )}
-        {activeTab === 'live' && <LiveAttendance />}
-        {activeTab === 'register' && (
-          <RegisterStudent onSuccess={() => setActiveTab('students')} />
+        {page === 'overview' && <Dashboard />}
+        {page === 'live' && <LiveAttendance />}
+        {page === 'students' && <StudentsList />}
+        {page === 'register' && <RegisterStudent />}
+        {page === 'records' && <AttendanceRecords />}
+        {page === 'reports' && (
+          <Suspense fallback={<Loading />}>
+            <Analytics />
+          </Suspense>
         )}
-        {activeTab === 'students' && (
-          <StudentsList onNavigateToRegister={() => setActiveTab('register')} />
-        )}
-        {activeTab === 'attendance' && <AttendanceRecords />}
-        {activeTab === 'analytics' && <Analytics />}
-        {activeTab === 'anomalies' && <Anomalies />}
+        {page === 'timetable' && <Timetable />}
+        {page === 'flags' && <Anomalies />}
+        {page === 'self' && <SelfCheck />}
       </main>
-
-      <footer className="border-t border-slate-900 bg-slate-950/80 py-6 text-center text-xs text-slate-500">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>AI-Powered Face Recognition Attendance System &bull; Production SaaS</span>
-          <span className="text-slate-400">
-            FastAPI &bull; React + Vite &bull; OpenCV YuNet &bull; ArcFace (512-D) &bull; Neon pgvector
-          </span>
-        </div>
-      </footer>
     </div>
   );
 }

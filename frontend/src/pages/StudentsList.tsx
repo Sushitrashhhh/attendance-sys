@@ -1,247 +1,284 @@
-import React, { useState, useEffect } from 'react';
-import {
-  Users,
-  Search,
-  UserPlus,
-  Trash2,
-  AlertCircle,
-  RefreshCw,
-  Fingerprint,
-} from 'lucide-react';
-import { fetchStudents, deleteStudent } from '../api/client';
+import React, { useEffect, useState } from 'react';
+import { UserPlus } from 'lucide-react';
+import { deleteStudent, fetchStudentReport, fetchStudents, forgetLearnedFaces, updateStudent } from '../api/client';
+import { ExcusalList } from '../components/Excusals';
+import { Card, EmptyState, ErrorNote, Field, Loading, Modal, PageHeader, Pager, button, table } from '../components/ui';
+import { fmtDate } from '../lib/format';
+import { useData } from '../lib/useData';
+import { BRANCHES, LOW_ATTENDANCE, SEMESTERS } from '../lib/constants';
 import type { Student } from '../types';
 
-interface StudentsListProps {
-  onNavigateToRegister?: () => void;
-}
+const PAGE_SIZE = 50;
 
-export const StudentsList: React.FC<StudentsListProps> = ({ onNavigateToRegister }) => {
-  const [students, setStudents] = useState<Student[]>([]);
-  const [total, setTotal] = useState(0);
+export function StudentsList() {
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<number | null>(null);
-  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const [query, setQuery] = useState('');
+  const [skip, setSkip] = useState(0);
+  const [editing, setEditing] = useState<Student | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const loadData = async (searchTerm?: string) => {
-    setLoading(true);
-    setError(null);
+  // Debounce typing, and go back to page 1 when the search changes
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQuery(search.trim());
+      setSkip(0);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const students = useData(() => fetchStudents({ search: query, skip, limit: PAGE_SIZE }), [query, skip]);
+  const report = useData(() => fetchStudentReport(), []);
+  const pctById = new Map(report.data?.map((r) => [r.student_id, r]) ?? []);
+
+  const remove = async (s: Student) => {
+    setActionError(null);
     try {
-      const res = await fetchStudents(searchTerm);
-      setStudents(res.items);
-      setTotal(res.total);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load students');
-    } finally {
-      setLoading(false);
+      await deleteStudent(s.id);
+      setConfirmDelete(null);
+      students.reload();
+      report.reload();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Could not delete the student.');
     }
   };
 
-  useEffect(() => {
-    const delayDebounce = setTimeout(() => {
-      loadData(search);
-    }, 250);
-    return () => clearTimeout(delayDebounce);
-  }, [search]);
+  const total = students.data?.total ?? 0;
+  const rows = students.data?.items ?? [];
 
-  const handleDelete = async (id: number) => {
-    setDeletingId(id);
+  return (
+    <>
+      <PageHeader title="Students" subtitle={students.data ? `${total} enrolled` : undefined}>
+        <a href="#register" className={button.primary}>
+          <UserPlus className="h-4 w-4" />
+          Add student
+        </a>
+      </PageHeader>
+
+      {(students.error || actionError) && <ErrorNote message={(students.error || actionError)!} />}
+
+      <Card>
+        <div className="border-b border-stone-200 p-3">
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by name, roll number or branch"
+            aria-label="Search students"
+            className="w-full sm:w-80"
+          />
+        </div>
+
+        {!students.data ? (
+          <Loading />
+        ) : rows.length === 0 ? (
+          <EmptyState>
+            {query ? (
+              <>No students match “{query}”.</>
+            ) : (
+              <>
+                No students yet.{' '}
+                <a href="#register" className="text-accent underline">
+                  Add the first one
+                </a>
+              </>
+            )}
+          </EmptyState>
+        ) : (
+          <div className={table.wrap}>
+            <table className={table.el}>
+              <thead>
+                <tr>
+                  <th className={table.th}>Name</th>
+                  <th className={table.th}>Roll no.</th>
+                  <th className={table.th}>Branch</th>
+                  <th className={table.th}>Sem</th>
+                  <th className={table.th}>Attendance</th>
+                  <th className={table.th} title="Extra face references learned from confident live check-ins">
+                    Learned scans
+                  </th>
+                  <th className={table.th}>Enrolled</th>
+                  <th className={table.th}>
+                    <span className="sr-only">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((s) => {
+                  const r = pctById.get(s.id);
+                  const low = r?.percentage != null && r.percentage < LOW_ATTENDANCE;
+                  return (
+                    <tr key={s.id} className="hover:bg-stone-50">
+                      <td className={`${table.td} font-medium`}>{s.name}</td>
+                      <td className={`${table.td} font-mono text-xs`}>{s.roll_number}</td>
+                      <td className={table.td}>{s.branch}</td>
+                      <td className={table.td}>{s.semester}</td>
+                      <td className={`${table.td} tabular-nums`}>
+                        {r?.percentage == null ? (
+                          <span className="text-stone-400">–</span>
+                        ) : (
+                          <span className={low ? 'font-medium text-red-700' : ''} title={`${r.present_days} of ${r.total_days} class days`}>
+                            {r.percentage}%
+                          </span>
+                        )}
+                      </td>
+                      <td className={`${table.td} tabular-nums text-stone-600`}>{s.learned_samples || '–'}</td>
+                      <td className={`${table.td} text-stone-500`}>{fmtDate(s.created_at.slice(0, 10))}</td>
+                      <td className={`${table.td} whitespace-nowrap text-right`}>
+                        {confirmDelete === s.id ? (
+                          <span className="inline-flex items-center gap-2">
+                            <span className="text-xs text-stone-500">Delete student and their records?</span>
+                            <button className={`${button.small} bg-red-600 text-white hover:bg-red-700`} onClick={() => remove(s)}>
+                              Delete
+                            </button>
+                            <button className={`${button.small} text-stone-600 hover:bg-stone-100`} onClick={() => setConfirmDelete(null)}>
+                              Cancel
+                            </button>
+                          </span>
+                        ) : (
+                          <span className="inline-flex gap-1">
+                            <button className={`${button.small} text-stone-600 hover:bg-stone-100`} onClick={() => setEditing(s)}>
+                              Edit
+                            </button>
+                            <button className={`${button.small} text-stone-600 hover:bg-red-50 hover:text-red-700`} onClick={() => setConfirmDelete(s.id)}>
+                              Delete
+                            </button>
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <Pager skip={skip} limit={PAGE_SIZE} total={total} onChange={setSkip} />
+      </Card>
+
+      {editing && (
+        <EditStudent
+          key={editing.id}
+          student={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            students.reload();
+          }}
+          onForgot={students.reload}
+          onExcusalsChanged={report.reload}
+        />
+      )}
+    </>
+  );
+}
+
+function EditStudent({
+  student,
+  onClose,
+  onSaved,
+  onForgot,
+  onExcusalsChanged,
+}: {
+  student: Student;
+  onClose: () => void;
+  onSaved: () => void;
+  onForgot: () => void;
+  onExcusalsChanged: () => void;
+}) {
+  const [learned, setLearned] = useState(student.learned_samples);
+  const [form, setForm] = useState({
+    name: student.name,
+    roll_number: student.roll_number,
+    branch: student.branch,
+    semester: student.semester,
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
     try {
-      await deleteStudent(id);
-      setDeleteConfirmId(null);
-      await loadData(search);
+      await updateStudent(student.id, { ...form, name: form.name.trim(), roll_number: form.roll_number.trim(), branch: form.branch.trim() });
+      onSaved();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Deletion failed');
+      setError(err instanceof Error ? err.message : 'Could not save changes.');
     } finally {
-      setDeletingId(null);
+      setSaving(false);
     }
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-            <Users className="h-6 w-6 text-blue-400" />
-            Student Directory
-          </h1>
-          <p className="text-sm text-slate-400 mt-1">
-            Manage enrolled students and biometric biometric profiles stored in Neon pgvector.
-          </p>
+    <Modal open title="Edit student" onClose={onClose}>
+      <form onSubmit={save} className="space-y-4">
+        {error && <ErrorNote message={error} />}
+        <Field label="Full name">
+          <input type="text" required minLength={2} maxLength={120} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full" />
+        </Field>
+        <Field label="Roll number">
+          <input type="text" required maxLength={50} value={form.roll_number} onChange={(e) => setForm({ ...form, roll_number: e.target.value })} className="w-full font-mono uppercase" />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Branch">
+            <input type="text" list="edit-branches" required minLength={2} maxLength={100} value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} className="w-full" />
+            <datalist id="edit-branches">
+              {BRANCHES.map((b) => (
+                <option key={b} value={b} />
+              ))}
+            </datalist>
+          </Field>
+          <Field label="Semester">
+            <select value={form.semester} onChange={(e) => setForm({ ...form, semester: Number(e.target.value) })} className="w-full">
+              {SEMESTERS.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </Field>
         </div>
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => loadData(search)}
-            className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white transition-colors"
-            title="Refresh list"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin text-blue-400' : ''}`} />
-          </button>
-          {onNavigateToRegister && (
-            <button
-              onClick={onNavigateToRegister}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-500 font-medium text-sm transition-all shadow-lg shadow-blue-600/20"
-            >
-              <UserPlus className="h-4 w-4" />
-              <span>Enroll New Student</span>
-            </button>
+        <div className="rounded-md bg-stone-50 px-3 py-2.5 text-xs text-stone-600">
+          {learned > 0 ? (
+            <div className="flex items-center justify-between gap-3">
+              <span>
+                Recognition has learned from {learned} recent check-in{learned === 1 ? '' : 's'}, so it keeps up with
+                changes like a new beard or glasses.
+              </span>
+              <button
+                type="button"
+                className={`${button.small} shrink-0 border border-stone-300 bg-white hover:bg-stone-100`}
+                onClick={async () => {
+                  try {
+                    await forgetLearnedFaces(student.id);
+                    setLearned(0);
+                    onForgot();
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Could not reset.');
+                  }
+                }}
+              >
+                Forget them
+              </button>
+            </div>
+          ) : (
+            'Recognition learns from confident live check-ins over time.'
           )}
+          <div className="mt-1.5">The enrollment photo can't be changed here. To re-take it, delete and add the student again.</div>
         </div>
-      </div>
-
-      {/* Search Filter Bar */}
-      <div className="glass-panel p-4 rounded-xl border border-slate-800 flex items-center gap-3">
-        <Search className="h-5 w-5 text-slate-500" />
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by student name, roll number, or department..."
-          className="bg-transparent border-none focus:outline-none text-sm text-white placeholder-slate-500 w-full"
-        />
-        {search && (
-          <button
-            onClick={() => setSearch('')}
-            className="text-xs text-slate-400 hover:text-white px-2 py-1 rounded bg-slate-800"
-          >
-            Clear
+        <div className="flex justify-end gap-2">
+          <button type="button" className={button.secondary} onClick={onClose}>
+            Cancel
           </button>
-        )}
+          <button type="submit" className={button.primary} disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </form>
+      <div className="mt-5 border-t border-stone-200 pt-4">
+        <ExcusalList studentId={student.id} onChange={onExcusalsChanged} />
       </div>
-
-      {/* Content States */}
-      {error && (
-        <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm flex items-center gap-2">
-          <AlertCircle className="h-4 w-4" />
-          <span>{error}</span>
-        </div>
-      )}
-
-      {loading && (
-        <div className="glass-panel p-12 rounded-xl border border-slate-800 text-center">
-          <RefreshCw className="h-8 w-8 text-blue-400 animate-spin mx-auto mb-3" />
-          <p className="text-slate-400 text-sm">Querying Neon PostgreSQL students table...</p>
-        </div>
-      )}
-
-      {!loading && students.length === 0 && (
-        <div className="glass-panel p-12 rounded-xl border border-slate-800 text-center">
-          <Users className="h-12 w-12 text-slate-600 mx-auto mb-3" />
-          <h3 className="text-lg font-semibold text-white">No students found</h3>
-          <p className="text-slate-400 text-sm mt-1 max-w-md mx-auto">
-            {search
-              ? `No student matching "${search}". Try a different roll number or name.`
-              : 'No students have been enrolled yet. Use the registration page to enroll students with webcam face recognition.'}
-          </p>
-          {onNavigateToRegister && !search && (
-            <button
-              onClick={onNavigateToRegister}
-              className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-500 text-sm font-medium transition-all"
-            >
-              <UserPlus className="h-4 w-4" />
-              Enroll First Student
-            </button>
-          )}
-        </div>
-      )}
-
-      {!loading && students.length > 0 && (
-        <div className="glass-panel rounded-xl border border-slate-800 overflow-hidden shadow-xl">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm text-slate-300">
-              <thead className="bg-slate-900/80 border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400">
-                <tr>
-                  <th className="px-6 py-4">Student</th>
-                  <th className="px-6 py-4">Roll Number</th>
-                  <th className="px-6 py-4">Branch / Dept</th>
-                  <th className="px-6 py-4">Semester</th>
-                  <th className="px-6 py-4">Biometrics</th>
-                  <th className="px-6 py-4">Enrolled On</th>
-                  <th className="px-6 py-4 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {students.map((student) => (
-                  <tr key={student.id} className="hover:bg-slate-900/40 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center gap-3">
-                        <div className="h-9 w-9 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white font-bold text-xs shadow-md">
-                          {student.name
-                            .split(' ')
-                            .map((n) => n[0])
-                            .slice(0, 2)
-                            .join('')
-                            .toUpperCase()}
-                        </div>
-                        <div>
-                          <div className="font-medium text-white">{student.name}</div>
-                          <div className="text-xs text-slate-400">ID #{student.id}</div>
-                        </div>
-                      </div>
-                    </td>
-
-                    <td className="px-6 py-4 whitespace-nowrap font-mono text-xs text-blue-400 font-semibold">
-                      {student.roll_number}
-                    </td>
-
-                    <td className="px-6 py-4 whitespace-nowrap text-slate-300">{student.branch}</td>
-
-                    <td className="px-6 py-4 whitespace-nowrap text-slate-300">
-                      Semester {student.semester}
-                    </td>
-
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                        <Fingerprint className="h-3 w-3" />
-                        ArcFace 512-D
-                      </span>
-                    </td>
-
-                    <td className="px-6 py-4 whitespace-nowrap text-xs text-slate-400">
-                      {new Date(student.created_at).toLocaleDateString()}
-                    </td>
-
-                    <td className="px-6 py-4 whitespace-nowrap text-right">
-                      {deleteConfirmId === student.id ? (
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            onClick={() => handleDelete(student.id)}
-                            disabled={deletingId === student.id}
-                            className="px-2.5 py-1 rounded bg-red-600 hover:bg-red-500 text-white text-xs font-semibold"
-                          >
-                            {deletingId === student.id ? 'Deleting...' : 'Confirm'}
-                          </button>
-                          <button
-                            onClick={() => setDeleteConfirmId(null)}
-                            className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => setDeleteConfirmId(student.id)}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                          title="Delete student and purge biometrics"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="px-6 py-3 bg-slate-900/50 border-t border-slate-800/80 text-xs text-slate-400 flex items-center justify-between">
-            <span>Showing {students.length} of {total} registered students</span>
-            <span>Biometric embeddings indexed via pgvector</span>
-          </div>
-        </div>
-      )}
-    </div>
+    </Modal>
   );
-};
+}

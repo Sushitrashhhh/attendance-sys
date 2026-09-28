@@ -15,9 +15,11 @@ def get_engine_url() -> str:
         raise ValueError(
             "DATABASE_URL is missing or empty! Please configure DATABASE_URL in your .env file."
         )
-    # Ensure standard postgresql driver format if passed as postgres://
+    # Ensure standard postgresql driver format with psycopg2
     if raw_url.startswith("postgres://"):
-        raw_url = raw_url.replace("postgres://", "postgresql://", 1)
+        raw_url = raw_url.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif raw_url.startswith("postgresql://") and not raw_url.startswith("postgresql+"):
+        raw_url = raw_url.replace("postgresql://", "postgresql+psycopg2://", 1)
     return raw_url
 
 

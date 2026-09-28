@@ -1,116 +1,150 @@
-import type { HealthStatus, Student, AttendanceRecord, AnalyticsOverview } from '../types';
+import type {
+  AnalyticsOverview,
+  Anomaly,
+  AttendanceFilters,
+  AttendanceRecord,
+  Excusal,
+  HealthStatus,
+  Lecture,
+  LectureInput,
+  RecognitionResult,
+  SelfCheck,
+  Student,
+  StudentPatch,
+  StudentReportRow,
+  TrendPoint,
+} from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(API_BASE_URL + path, init);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const detail = body?.detail;
+    // FastAPI validation errors come back as a list of {msg, loc}
+    const message =
+      typeof detail === 'string' ? detail : Array.isArray(detail) ? detail[0]?.msg : undefined;
+    throw new Error(message || `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+const sendJson = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+});
+
+function query(params: Record<string, string | number | undefined>) {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== '') qs.set(key, String(value));
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
 export async function fetchHealth(): Promise<HealthStatus> {
   try {
-    const res = await fetch(`${API_BASE_URL}/health`, {
-      headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) {
-      return {
-        status: 'error',
-        database: 'disconnected',
-        version: '1.0.0',
-        environment: 'unknown',
-        details: { error: `HTTP ${res.status}: ${res.statusText}` },
-      };
-    }
-    return await res.json();
+    return await request<HealthStatus>('/health');
   } catch (err) {
     return {
       status: 'error',
       database: 'disconnected',
-      version: '1.0.0',
+      version: '',
       environment: 'unknown',
       details: { error: err instanceof Error ? err.message : 'Backend unreachable' },
     };
   }
 }
 
-export async function fetchStudents(search?: string): Promise<{ total: number; items: Student[] }> {
-  const url = new URL(`${API_BASE_URL}/api/students`, window.location.origin);
-  if (search && search.trim()) {
-    url.searchParams.set('search', search.trim());
-  }
-  const res = await fetch(url.toString());
-  if (!res.ok) throw new Error('Failed to fetch students');
-  return res.json();
-}
+// Students
+export const fetchStudents = (params: { search?: string; skip?: number; limit?: number } = {}) =>
+  request<{ total: number; items: Student[] }>(`/api/students${query(params)}`);
 
-export async function registerStudent(formData: FormData): Promise<Student> {
-  const res = await fetch(`${API_BASE_URL}/api/students`, {
-    method: 'POST',
-    body: formData,
-  });
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({ detail: 'Registration failed' }));
-    throw new Error(errData.detail || 'Registration failed');
-  }
-  return res.json();
-}
+export const registerStudent = (formData: FormData) =>
+  request<Student>('/api/students', { method: 'POST', body: formData });
 
-export async function deleteStudent(studentId: number): Promise<{ success: boolean; message: string }> {
-  const res = await fetch(`${API_BASE_URL}/api/students/${studentId}`, {
+export const updateStudent = (id: number, patch: StudentPatch) =>
+  request<Student>(`/api/students/${id}`, sendJson('PUT', patch));
+
+export const deleteStudent = (id: number) =>
+  request<{ success: boolean }>(`/api/students/${id}`, { method: 'DELETE' });
+
+export const forgetLearnedFaces = (id: number) =>
+  request<{ removed: number }>(`/api/students/${id}/face-samples`, { method: 'DELETE' });
+
+// Timetable
+export const fetchLectures = () => request<Lecture[]>('/api/lectures');
+
+export const createLecture = (lecture: LectureInput) => request<Lecture>('/api/lectures', sendJson('POST', lecture));
+
+export const deleteLecture = (id: number) =>
+  request<{ success: boolean }>(`/api/lectures/${id}`, { method: 'DELETE' });
+
+type LectureId = number | null | undefined;
+const lectureQuery = (lectureId: LectureId) => query({ lecture_id: lectureId ?? undefined });
+
+// Attendance
+export const fetchAttendance = (filters: AttendanceFilters = {}) =>
+  request<{ total: number; items: AttendanceRecord[] }>(`/api/attendance${query({ ...filters })}`);
+
+export const attendanceExportUrl = ({ search, date_from, date_to, lecture_id }: AttendanceFilters) =>
+  `${API_BASE_URL}/api/attendance/export${query({ search, date_from, date_to, lecture_id })}`;
+
+export const fetchTodayAttendance = (lectureId?: LectureId) =>
+  request<AttendanceRecord[]>(`/api/attendance/today${lectureQuery(lectureId)}`);
+
+export const fetchAbsentToday = (lectureId?: LectureId) =>
+  request<Student[]>(`/api/attendance/absent-today${lectureQuery(lectureId)}`);
+
+export const markPresent = (studentId: number, lectureId?: LectureId) =>
+  request<AttendanceRecord>(
+    '/api/attendance/mark',
+    sendJson('POST', { student_id: studentId, lecture_id: lectureId ?? null })
+  );
+
+export const deleteAttendance = (id: number) =>
+  request<{ success: boolean }>(`/api/attendance/${id}`, { method: 'DELETE' });
+
+// Analytics
+export const fetchOverview = (lectureId?: LectureId) =>
+  request<AnalyticsOverview>(`/api/analytics/overview${lectureQuery(lectureId)}`);
+
+export const fetchTrends = (days = 14) => request<TrendPoint[]>(`/api/analytics/trends?days=${days}`);
+
+export const fetchStudentReport = (lectureId?: LectureId) =>
+  request<StudentReportRow[]>(`/api/analytics/students${lectureQuery(lectureId)}`);
+
+export const fetchAnomalies = () => request<Anomaly[]>('/api/analytics/anomalies');
+
+export const dismissFailedChecks = (studentId: number, date: string) =>
+  request<{ removed: number }>(`/api/analytics/failed-checks${query({ student_id: studentId, date })}`, {
     method: 'DELETE',
   });
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({ detail: 'Deletion failed' }));
-    throw new Error(errData.detail || 'Deletion failed');
-  }
-  return res.json();
+
+export const fetchSelfCheck = (rollNumber: string) =>
+  request<SelfCheck>(`/api/analytics/self-check/${encodeURIComponent(rollNumber.trim())}`);
+
+// Excused absences
+export const fetchExcusals = (studentId: number) => request<Excusal[]>(`/api/excusals${query({ student_id: studentId })}`);
+
+export const createExcusal = (excusal: Omit<Excusal, 'id' | 'created_at'>) =>
+  request<Excusal>('/api/excusals', sendJson('POST', excusal));
+
+export const deleteExcusal = (id: number) => request<{ success: boolean }>(`/api/excusals/${id}`, { method: 'DELETE' });
+
+// Recognition
+export function liveSocketUrl() {
+  const url = new URL('/ws/live-attendance', API_BASE_URL || window.location.origin);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url.toString();
 }
 
-export async function fetchAttendance(params?: {
-  date?: string;
-  student_id?: number;
-  skip?: number;
-  limit?: number;
-}): Promise<{ total: number; items: AttendanceRecord[] }> {
-  const url = new URL(`${API_BASE_URL}/api/attendance`, window.location.origin);
-  if (params?.date) url.searchParams.set('date', params.date);
-  if (params?.student_id) url.searchParams.set('student_id', params.student_id.toString());
-  if (params?.skip) url.searchParams.set('skip', params.skip.toString());
-  if (params?.limit) url.searchParams.set('limit', params.limit.toString());
-
-  const res = await fetch(url.toString());
-  if (!res.ok) throw new Error('Failed to fetch attendance');
-  return res.json();
-}
-
-export async function fetchTodayAttendance(): Promise<AttendanceRecord[]> {
-  const res = await fetch(`${API_BASE_URL}/api/attendance/today`);
-  if (!res.ok) throw new Error("Failed to fetch today's attendance");
-  return res.json();
-}
-
-export async function fetchAnalyticsOverview(): Promise<AnalyticsOverview> {
-  const res = await fetch(`${API_BASE_URL}/api/analytics/overview`);
-  if (!res.ok) throw new Error('Failed to fetch analytics overview');
-  return res.json();
-}
-
-export async function fetchAnalyticsTrends(days: number = 14): Promise<{ date: string; day: string; present: number }[]> {
-  const res = await fetch(`${API_BASE_URL}/api/analytics/trends?days=${days}`);
-  if (!res.ok) throw new Error('Failed to fetch attendance trends');
-  return res.json();
-}
-
-export async function fetchAnomalies(): Promise<any[]> {
-  const res = await fetch(`${API_BASE_URL}/api/analytics/anomalies`);
-  if (!res.ok) throw new Error('Failed to fetch anomalies');
-  return res.json();
-}
-
-export async function testRecognitionJson(imageBase64: string, autoMark: boolean = true): Promise<any> {
-  const res = await fetch(`${API_BASE_URL}/api/recognition/test-json`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image_base64: imageBase64, auto_mark: autoMark }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Recognition test failed' }));
-    throw new Error(err.detail || 'Recognition test failed');
-  }
-  return res.json();
-}
+// HTTP fallback when the WebSocket is unavailable
+export const recognizeImage = (imageBase64: string, autoMark = true, lectureId?: LectureId) =>
+  request<RecognitionResult>(
+    '/api/recognition/test-json',
+    sendJson('POST', { image_base64: imageBase64, auto_mark: autoMark, lecture_id: lectureId ?? null })
+  );
