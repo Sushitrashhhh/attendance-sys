@@ -1,20 +1,21 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
-import { Dashboard } from './pages/Dashboard';
-import { LiveAttendance } from './pages/LiveAttendance';
-import { RegisterStudent } from './pages/RegisterStudent';
-import { StudentsList } from './pages/StudentsList';
-import { AttendanceRecords } from './pages/AttendanceRecords';
-import { Anomalies } from './pages/Anomalies';
-import { Timetable } from './pages/Timetable';
-import { SelfCheck } from './pages/SelfCheck';
 import { fetchHealth } from './api/client';
 import { Loading } from './components/ui';
 import { useData } from './lib/useData';
 import type { Page } from './types';
 
-// Reports pulls in the charting library; load it only when opened
+// Lazy-load every page so the initial JS bundle stays small and the app opens faster.
+// The Suspense boundary shows a spinner while the chunk is downloading.
+const Dashboard = lazy(() => import('./pages/Dashboard').then((m) => ({ default: m.Dashboard })));
+const LiveAttendance = lazy(() => import('./pages/LiveAttendance').then((m) => ({ default: m.LiveAttendance })));
+const StudentsList = lazy(() => import('./pages/StudentsList').then((m) => ({ default: m.StudentsList })));
+const RegisterStudent = lazy(() => import('./pages/RegisterStudent').then((m) => ({ default: m.RegisterStudent })));
+const AttendanceRecords = lazy(() => import('./pages/AttendanceRecords').then((m) => ({ default: m.AttendanceRecords })));
 const Analytics = lazy(() => import('./pages/Analytics').then((m) => ({ default: m.Analytics })));
+const Timetable = lazy(() => import('./pages/Timetable').then((m) => ({ default: m.Timetable })));
+const Anomalies = lazy(() => import('./pages/Anomalies').then((m) => ({ default: m.Anomalies })));
+const SelfCheck = lazy(() => import('./pages/SelfCheck').then((m) => ({ default: m.SelfCheck })));
 
 const PAGES: Page[] = ['overview', 'live', 'students', 'register', 'records', 'reports', 'timetable', 'flags', 'self'];
 
@@ -46,19 +47,19 @@ export function App() {
             {health.details?.error && <span className="block text-xs text-red-700/80">{health.details.error}</span>}
           </div>
         )}
-        {page === 'overview' && <Dashboard />}
-        {page === 'live' && <LiveAttendance />}
-        {page === 'students' && <StudentsList />}
-        {page === 'register' && <RegisterStudent />}
-        {page === 'records' && <AttendanceRecords />}
+        {page === 'overview' && <Suspense fallback={<Loading />}><Dashboard /></Suspense>}
+        {page === 'live' && <Suspense fallback={<Loading />}><LiveAttendance /></Suspense>}
+        {page === 'students' && <Suspense fallback={<Loading />}><StudentsList /></Suspense>}
+        {page === 'register' && <Suspense fallback={<Loading />}><RegisterStudent /></Suspense>}
+        {page === 'records' && <Suspense fallback={<Loading />}><AttendanceRecords /></Suspense>}
         {page === 'reports' && (
           <Suspense fallback={<Loading />}>
             <Analytics />
           </Suspense>
         )}
-        {page === 'timetable' && <Timetable />}
-        {page === 'flags' && <Anomalies />}
-        {page === 'self' && <SelfCheck />}
+        {page === 'timetable' && <Suspense fallback={<Loading />}><Timetable /></Suspense>}
+        {page === 'flags' && <Suspense fallback={<Loading />}><Anomalies /></Suspense>}
+        {page === 'self' && <Suspense fallback={<Loading />}><SelfCheck /></Suspense>}
       </main>
     </div>
   );

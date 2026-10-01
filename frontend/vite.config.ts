@@ -21,4 +21,19 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    target: 'es2020',
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        // Split vendor libraries into separate cacheable chunks so users don't re-download
+        // unchanged dependencies on every deploy.
+        manualChunks(id) {
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) return 'react';
+          if (id.includes('node_modules/recharts')) return 'charts';
+          if (id.includes('node_modules/lucide-react')) return 'icons';
+        },
+      },
+    },
+  },
 })

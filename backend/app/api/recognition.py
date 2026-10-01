@@ -141,9 +141,10 @@ async def websocket_recognition(websocket: WebSocket):
     logger.info("WebSocket client connected for live attendance streaming.")
     session = LiveSession()
 
-    # Rate limit: at most ~5 inferences per second per connection to conserve CPU
+    # Rate limit: at most ~8 inferences per second per connection
+    # 0.12 s interval keeps CPU comfortable while improving recognition responsiveness
     last_process_time = 0.0
-    min_interval = 0.18  # seconds
+    min_interval = 0.12  # seconds (~8 fps)
 
     try:
         while True:

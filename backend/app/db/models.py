@@ -108,6 +108,11 @@ class Attendance(Base):
             unique=True,
             postgresql_nulls_not_distinct=True,
         ),
+        # Composite index for today's dashboard queries (get_today_records, get_absent_today, get_analytics_overview)
+        # Without this index Postgres does a full-table scan on every dashboard page load.
+        Index("ix_attendance_date_lecture", "attendance_date", "lecture_id"),
+        # Index for per-student history queries (get_student_records, get_by_student_and_date)
+        Index("ix_attendance_student_date", "student_id", "attendance_date"),
     )
 
     def __repr__(self) -> str:

@@ -1,6 +1,6 @@
 from datetime import date
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
@@ -28,16 +28,21 @@ def get_analytics_overview(
 @router.get("/trends")
 def get_attendance_trends(
     days: int = Query(14, ge=3, le=90),
+    response: Response = None,
     db: Session = Depends(get_db),
 ):
     """Fetch attendance trend data for charts over the last N days."""
+    if response:
+        response.headers["Cache-Control"] = "public, max-age=60"
     repo = AttendanceRepository(db)
     return repo.get_trends(days=days)
 
 
 @router.get("/distribution")
-def get_branch_distribution(db: Session = Depends(get_db)):
+def get_branch_distribution(response: Response = None, db: Session = Depends(get_db)):
     """Fetch student counts and attendance breakdown grouped by department/branch."""
+    if response:
+        response.headers["Cache-Control"] = "public, max-age=120"
     stmt = (
         select(
             Student.branch,

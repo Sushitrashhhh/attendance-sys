@@ -162,12 +162,12 @@ This places the following models inside `models/`:
 
 ```bash
 cd backend
-python -m venv venv
+python -m venv .venv
 
 # Windows
-.\venv\Scripts\activate
+.\.venv\Scripts\activate
 # Linux/macOS
-source venv/bin/activate
+source .venv/bin/activate
 
 pip install -r requirements.txt
 alembic upgrade head   # re-run after pulling: new migrations live in app/db/migrations/versions

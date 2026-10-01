@@ -27,14 +27,29 @@ class FaceEmbedder:
                 f"ArcFace model not found at {self.model_path}. Model download required."
             )
         opts = ort.SessionOptions()
-        opts.inter_op_num_threads = 2
-        opts.intra_op_num_threads = 2
+        # Use all available logical CPUs for intra-op parallelism (matrix multiplications inside a layer)
+        # and 2 threads for inter-op (parallelism across independent nodes in the graph).
+        import os as _os
+        cpu_count = _os.cpu_count() or 4
+        opts.inter_op_num_threads = min(2, cpu_count)
+        opts.intra_op_num_threads = min(cpu_count, 8)  # cap at 8 to avoid cache thrashing
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        opts.enable_mem_pattern = True          # reuse memory allocations across runs
+        opts.enable_cpu_mem_arena = True        # use a memory arena for faster allocation
+
+        # Try GPU providers (CUDA for Linux, DirectML for Windows) before falling back to CPU
+        available = ort.get_available_providers()
+        providers = []
+        if "CUDAExecutionProvider" in available:
+            providers.append("CUDAExecutionProvider")
+        if "DmlExecutionProvider" in available:   # DirectML — Windows GPU
+            providers.append("DmlExecutionProvider")
+        providers.append("CPUExecutionProvider")
 
         self._session = ort.InferenceSession(
             self.model_path,
             sess_options=opts,
-            providers=["CPUExecutionProvider"],
+            providers=providers,
         )
         self._input_name = self._session.get_inputs()[0].name
         self._output_name = self._session.get_outputs()[0].name

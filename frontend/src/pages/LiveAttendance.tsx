@@ -9,8 +9,8 @@ import { useData } from '../lib/useData';
 import { useLectureChoice } from '../lib/useLectureChoice';
 import type { RecognitionResult } from '../types';
 
-const CAPTURE_WIDTH = 480; // frames are downscaled to this width (aspect ratio kept) before upload
-const REPLY_TIMEOUT_MS = 4000; // give up on a lost reply and send the next frame
+const CAPTURE_WIDTH = 400; // frames are downscaled to this width (aspect ratio kept) before upload
+const REPLY_TIMEOUT_MS = 3000; // give up on a lost reply and send the next frame
 
 const COLORS: Partial<Record<RecognitionResult['status'], string>> = {
   MATCH: '#16a34a',
@@ -149,7 +149,7 @@ export function LiveAttendance() {
         canvas.width = w;
         canvas.height = h;
         canvas.getContext('2d')?.drawImage(video, 0, 0, w, h);
-        const image = canvas.toDataURL('image/jpeg', 0.85);
+        const image = canvas.toDataURL('image/jpeg', 0.75);
         pending = { w, h };
         waitingSince = now;
 

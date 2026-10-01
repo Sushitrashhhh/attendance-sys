@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from app.config import get_settings
 from app.api.health import router as health_router
 from app.api.students import router as students_router
@@ -27,6 +28,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"Environment: {settings.app_env}")
     logger.info(f"Recognition Threshold: {settings.recognition_threshold}")
     logger.info(f"Liveness Threshold: {settings.liveness_threshold}")
+
+    # Pre-load CV models at startup so the first recognition request isn't penalized
+    # by ONNX session initialization (which can add 2-5 s on first call).
+    try:
+        from app.cv.pipeline import get_pipeline
+        get_pipeline()  # initializes FaceDetector + FaceEmbedder + LivenessDetector
+        logger.info("CV pipeline (YuNet + ArcFace) loaded and ready.")
+    except Exception as exc:
+        logger.warning(f"Could not pre-load CV pipeline: {exc}")
+
     yield
     logger.info("Application shutdown complete.")
 
@@ -51,6 +62,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# GZip compression for JSON responses (analytics/attendance lists benefit significantly)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 from app.api.recognition import websocket_recognition
 

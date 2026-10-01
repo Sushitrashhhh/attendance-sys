@@ -28,11 +28,21 @@ try:
     _url = get_engine_url()
     engine = create_engine(
         _url,
-        pool_pre_ping=True,       # Recovers safely from serverless suspend/disconnects
-        pool_size=10,             # Keep connection pool moderate
-        max_overflow=15,          # Burst capacity
-        pool_recycle=300,         # Recycle connections every 5 mins
-        echo=False,               # Never log SQL with sensitive parameters
+        pool_pre_ping=True,        # Recovers safely from serverless suspend/disconnects
+        pool_size=10,              # Keep connection pool moderate
+        max_overflow=20,           # Burst capacity for concurrent frames
+        pool_recycle=180,          # Recycle connections every 3 mins (Neon can drop idle ones)
+        pool_timeout=30,           # Fail fast instead of hanging when pool is exhausted
+        echo=False,                # Never log SQL with sensitive parameters
+        connect_args={
+            # TCP keepalives prevent the Neon proxy from silently dropping idle connections
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 5,
+            "keepalives_count": 3,
+            # Application name for Neon query insights
+            "application_name": "attendance-sys",
+        },
     )
 except ValueError as e:
     # When initializing without DATABASE_URL during schema inspection or initial load,
